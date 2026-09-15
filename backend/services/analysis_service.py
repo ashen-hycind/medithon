@@ -294,6 +294,36 @@ def preaggregate_health_data(
                             "recorded_at": curr_w.get("recorded_at")
                         })
 
+    # Running accumulators for O(k) incremental updates
+    stats["accumulators"] = {
+        "bp_count": len(systolics),
+        "sys_sum": round(sum(systolics), 1) if systolics else 0.0,
+        "dia_sum": round(sum(diastolics), 1) if diastolics else 0.0,
+        "pulse_count": len(pulses),
+        "pulse_sum": round(sum(pulses), 1) if pulses else 0.0,
+        "morning_count": len(morning_sys),
+        "morning_sys_sum": round(sum(morning_sys), 1) if morning_sys else 0.0,
+        "morning_dia_sum": round(sum(morning_dia), 1) if morning_dia else 0.0,
+        "evening_count": len(evening_sys),
+        "evening_sys_sum": round(sum(evening_sys), 1) if evening_sys else 0.0,
+        "evening_dia_sum": round(sum(evening_dia), 1) if evening_dia else 0.0,
+        "glucose_count": len(glucose_vals),
+        "glucose_sum": round(sum(glucose_vals), 1) if glucose_vals else 0.0,
+        "fasting_count": len(fasting_vals),
+        "fasting_sum": round(sum(fasting_vals), 1) if fasting_vals else 0.0,
+        "post_meal_count": len(post_meal_vals),
+        "post_meal_sum": round(sum(post_meal_vals), 1) if post_meal_vals else 0.0,
+        "baseline_sys_count": len(baseline_sys),
+        "baseline_sys_sum": round(sum(baseline_sys), 1) if baseline_sys else 0.0,
+        "confounder_counts": {
+            tag: {
+                "count": c["count"],
+                "sys_sum": round(c["avg_systolic_with_tag"] * c["count"], 1)
+            }
+            for tag, c in stats.get("confounder_effects", {}).items()
+        }
+    }
+
     # Run full pattern detection on the raw records
     stats["patterns"] = detect_exact_patterns(bp_records, glucose_records)
 
@@ -301,7 +331,213 @@ def preaggregate_health_data(
 
 
 # =====================================================================
-# 1b. Exact Pattern Detection Engine
+# 1b. Incremental Rote Accumulator Engine
+# =====================================================================
+
+def update_running_stats(
+    prior_stats: Dict[str, Any],
+    prior_accumulators: Dict[str, Any],
+    delta_bp_records: List[Dict[str, Any]],
+    delta_glucose_records: List[Dict[str, Any]],
+    delta_weight_records: Optional[List[Dict[str, Any]]] = None
+) -> Dict[str, Any]:
+    """
+    Incrementally updates health statistics in O(k) time by combining prior accumulators
+    with newly recorded delta measurements, avoiding re-scanning historical database records.
+    """
+    delta_stats = preaggregate_health_data(delta_bp_records, delta_glucose_records, delta_weight_records)
+    delta_acc = delta_stats.get("accumulators", {})
+
+    new_acc = {
+        "bp_count": prior_accumulators.get("bp_count", 0) + delta_acc.get("bp_count", 0),
+        "sys_sum": round(prior_accumulators.get("sys_sum", 0.0) + delta_acc.get("sys_sum", 0.0), 1),
+        "dia_sum": round(prior_accumulators.get("dia_sum", 0.0) + delta_acc.get("dia_sum", 0.0), 1),
+        "pulse_count": prior_accumulators.get("pulse_count", 0) + delta_acc.get("pulse_count", 0),
+        "pulse_sum": round(prior_accumulators.get("pulse_sum", 0.0) + delta_acc.get("pulse_sum", 0.0), 1),
+        "morning_count": prior_accumulators.get("morning_count", 0) + delta_acc.get("morning_count", 0),
+        "morning_sys_sum": round(prior_accumulators.get("morning_sys_sum", 0.0) + delta_acc.get("morning_sys_sum", 0.0), 1),
+        "morning_dia_sum": round(prior_accumulators.get("morning_dia_sum", 0.0) + delta_acc.get("morning_dia_sum", 0.0), 1),
+        "evening_count": prior_accumulators.get("evening_count", 0) + delta_acc.get("evening_count", 0),
+        "evening_sys_sum": round(prior_accumulators.get("evening_sys_sum", 0.0) + delta_acc.get("evening_sys_sum", 0.0), 1),
+        "evening_dia_sum": round(prior_accumulators.get("evening_dia_sum", 0.0) + delta_acc.get("evening_dia_sum", 0.0), 1),
+        "glucose_count": prior_accumulators.get("glucose_count", 0) + delta_acc.get("glucose_count", 0),
+        "glucose_sum": round(prior_accumulators.get("glucose_sum", 0.0) + delta_acc.get("glucose_sum", 0.0), 1),
+        "fasting_count": prior_accumulators.get("fasting_count", 0) + delta_acc.get("fasting_count", 0),
+        "fasting_sum": round(prior_accumulators.get("fasting_sum", 0.0) + delta_acc.get("fasting_sum", 0.0), 1),
+        "post_meal_count": prior_accumulators.get("post_meal_count", 0) + delta_acc.get("post_meal_count", 0),
+        "post_meal_sum": round(prior_accumulators.get("post_meal_sum", 0.0) + delta_acc.get("post_meal_sum", 0.0), 1),
+        "baseline_sys_count": prior_accumulators.get("baseline_sys_count", 0) + delta_acc.get("baseline_sys_count", 0),
+        "baseline_sys_sum": round(prior_accumulators.get("baseline_sys_sum", 0.0) + delta_acc.get("baseline_sys_sum", 0.0), 1),
+        "confounder_counts": dict(prior_accumulators.get("confounder_counts", {}))
+    }
+
+    # Merge confounder counts
+    for tag, c_delta in delta_acc.get("confounder_counts", {}).items():
+        if tag not in new_acc["confounder_counts"]:
+            new_acc["confounder_counts"][tag] = {"count": 0, "sys_sum": 0.0}
+        new_acc["confounder_counts"][tag]["count"] += c_delta["count"]
+        new_acc["confounder_counts"][tag]["sys_sum"] = round(new_acc["confounder_counts"][tag]["sys_sum"] + c_delta["sys_sum"], 1)
+
+    updated_stats: Dict[str, Any] = {
+        "total_bp_readings": new_acc["bp_count"],
+        "total_glucose_readings": new_acc["glucose_count"],
+        "avg_systolic": round(new_acc["sys_sum"] / new_acc["bp_count"], 1) if new_acc["bp_count"] else None,
+        "avg_diastolic": round(new_acc["dia_sum"] / new_acc["bp_count"], 1) if new_acc["bp_count"] else None,
+        "avg_pulse": round(new_acc["pulse_sum"] / new_acc["pulse_count"], 1) if new_acc["pulse_count"] else None,
+        "avg_glucose_mg_dl": round(new_acc["glucose_sum"] / new_acc["glucose_count"], 1) if new_acc["glucose_count"] else None,
+        "morning_avg_bp": {
+            "systolic": round(new_acc["morning_sys_sum"] / new_acc["morning_count"], 1),
+            "diastolic": round(new_acc["morning_dia_sum"] / new_acc["morning_count"], 1),
+            "count": new_acc["morning_count"]
+        } if new_acc["morning_count"] else None,
+        "evening_avg_bp": {
+            "systolic": round(new_acc["evening_sys_sum"] / new_acc["evening_count"], 1),
+            "diastolic": round(new_acc["evening_dia_sum"] / new_acc["evening_count"], 1),
+            "count": new_acc["evening_count"]
+        } if new_acc["evening_count"] else None,
+        "fasting_avg_glucose": round(new_acc["fasting_sum"] / new_acc["fasting_count"], 1) if new_acc["fasting_count"] else None,
+        "post_meal_avg_glucose": round(new_acc["post_meal_sum"] / new_acc["post_meal_count"], 1) if new_acc["post_meal_count"] else None,
+        "confounder_effects": {},
+        "paired_readings": list(prior_stats.get("paired_readings", [])) + delta_stats.get("paired_readings", []),
+        "urgent_events": list(prior_stats.get("urgent_events", [])) + delta_stats.get("urgent_events", []),
+        "weight_shifts": list(prior_stats.get("weight_shifts", [])) + delta_stats.get("weight_shifts", []),
+        "accumulators": new_acc
+    }
+
+    base_sys = (new_acc["baseline_sys_sum"] / new_acc["baseline_sys_count"]) if new_acc["baseline_sys_count"] else updated_stats["avg_systolic"]
+    for tag, c in new_acc["confounder_counts"].items():
+        if c["count"] > 0 and base_sys is not None:
+            tag_avg = round(c["sys_sum"] / c["count"], 1)
+            updated_stats["confounder_effects"][tag] = {
+                "count": c["count"],
+                "avg_systolic_with_tag": tag_avg,
+                "baseline_systolic": round(base_sys, 1),
+                "delta_systolic": round(tag_avg - base_sys, 1)
+            }
+
+    # Merge patterns: update trend label, streak, and pulse pressure
+    prior_patterns = prior_stats.get("patterns", {})
+    delta_patterns = delta_stats.get("patterns", {})
+
+    updated_patterns = dict(prior_patterns)
+    if delta_patterns.get("bp_trend") and delta_patterns["bp_trend"].get("reading_count", 0) > 0:
+        updated_patterns["bp_trend"] = delta_patterns["bp_trend"]
+    if delta_patterns.get("consecutive_elevated_streak"):
+        updated_patterns["consecutive_elevated_streak"] = delta_patterns["consecutive_elevated_streak"]
+    if delta_patterns.get("pulse_pressure_stats"):
+        updated_patterns["pulse_pressure_stats"] = delta_patterns["pulse_pressure_stats"]
+    if delta_patterns.get("bp_variability_cv"):
+        updated_patterns["bp_variability_cv"] = delta_patterns["bp_variability_cv"]
+    if delta_patterns.get("bp_percentiles"):
+        updated_patterns["bp_percentiles"] = delta_patterns["bp_percentiles"]
+    if delta_patterns.get("glucose_variability_cv"):
+        updated_patterns["glucose_variability_cv"] = delta_patterns["glucose_variability_cv"]
+    if delta_patterns.get("time_of_day_heatmap"):
+        updated_patterns["time_of_day_heatmap"] = delta_patterns["time_of_day_heatmap"]
+    if delta_patterns.get("symptom_co_occurrence"):
+        updated_patterns["symptom_co_occurrence"] = delta_patterns["symptom_co_occurrence"]
+
+    updated_stats["patterns"] = updated_patterns
+    return updated_stats
+
+
+def reinforce_correlation_bank(
+    prior_bank: Optional[Dict[str, Any]],
+    current_correlations: List[CorrelationItem],
+    session_resumed: bool = False
+) -> Tuple[List[CorrelationItem], Dict[str, Any]]:
+    """
+    Maintains a persistent bank of clinical findings across sessions.
+    Reinforces existing findings with incremental evidence rather than re-discovering from zero.
+    """
+    bank = dict(prior_bank) if prior_bank else {}
+    reinforced_correlations: List[CorrelationItem] = []
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    for item in current_correlations:
+        key = f"{item.category}_{item.headline[:30].lower().strip().replace(' ', '_')}"
+        if key in bank and session_resumed:
+            prior_entry = bank[key]
+            new_evidence = max(prior_entry.get("evidence_count", 1) + 1, item.evidence_count)
+            prior_entry["evidence_count"] = new_evidence
+            prior_entry["last_reinforced_at"] = now_iso
+            prior_entry["reinforcement_count"] = prior_entry.get("reinforcement_count", 1) + 1
+
+            reinforced_correlations.append(CorrelationItem(
+                category=item.category,
+                confidence="high" if new_evidence >= 3 else item.confidence,
+                headline=prior_entry.get("headline", item.headline),
+                explanation=f"{item.explanation} [Reinforced across {new_evidence} cumulative logs]",
+                evidence_count=new_evidence,
+                clinical_suggestion=prior_entry.get("clinical_suggestion", item.clinical_suggestion)
+            ))
+        else:
+            bank[key] = {
+                "category": item.category,
+                "confidence": item.confidence,
+                "headline": item.headline,
+                "explanation": item.explanation,
+                "evidence_count": item.evidence_count,
+                "clinical_suggestion": item.clinical_suggestion,
+                "first_detected_at": now_iso,
+                "last_reinforced_at": now_iso,
+                "reinforcement_count": 1
+            }
+            reinforced_correlations.append(item)
+
+    return reinforced_correlations, bank
+
+
+def generate_progressive_doctor_summary(
+    stats: Dict[str, Any],
+    correlations: List[CorrelationItem],
+    rote_memory: Optional[Dict[str, Any]] = None
+) -> str:
+    """
+    Produces a progressive physician narrative that anchors on the historical baseline
+    and highlights the incremental delta changes rather than writing a full summary from zero.
+    """
+    lines = []
+    total_bp = stats.get("total_bp_readings", 0)
+    total_glu = stats.get("total_glucose_readings", 0)
+    avg_sys = stats.get("avg_systolic", "N/A")
+    avg_dia = stats.get("avg_diastolic", "N/A")
+    avg_glu = stats.get("avg_glucose_mg_dl", "N/A")
+
+    if rote_memory is not None and not isinstance(rote_memory, dict):
+        if hasattr(rote_memory, "model_dump"):
+            rote_memory = rote_memory.model_dump()
+        else:
+            rote_memory = getattr(rote_memory, "__dict__", {})
+
+    if rote_memory and rote_memory.get("session_resumed"):
+        checkpoint_at = rote_memory.get("last_checkpoint_at", "previous session")
+        delta_cnt = rote_memory.get("delta_readings_count", 0)
+        shift_desc = rote_memory.get("trajectory_shift_summary", "")
+
+        lines.append(
+            f"Progressive Longitudinal Clinical Evaluation: Anchored across {total_bp} blood pressure and {total_glu} glucose measurements (cumulative baseline systolic/diastolic: {avg_sys}/{avg_dia} mmHg, glucose {avg_glu} mg/dL)."
+        )
+        lines.append(
+            f"Since last evaluation ({checkpoint_at}), {delta_cnt} new reading(s) were recorded. {shift_desc}"
+        )
+    else:
+        lines.append(
+            f"Baseline Clinical Evaluation: Established across {total_bp} blood pressure measurements (mean systolic/diastolic: {avg_sys}/{avg_dia} mmHg) and {total_glu} glucose recordings (mean: {avg_glu} mg/dL)."
+        )
+
+    if correlations:
+        top_items = [f"'{c.headline}' ({c.category.replace('_', ' ')})" for c in correlations[:3]]
+        lines.append(f"Active clinical correlations under monitoring: {'; '.join(top_items)}.")
+    else:
+        lines.append("No acute cross-stream anomalies or adverse confounders were noted.")
+
+    lines.append("Continue tracking routine diurnal vitals and share this cumulative longitudinal trajectory with your attending physician.")
+    return " ".join(lines)
+
+
+# =====================================================================
+# 1c. Exact Pattern Detection Engine
 # =====================================================================
 
 def _classify_bp_stage(systolic: int, diastolic: int) -> str:
@@ -883,9 +1119,11 @@ def generate_heuristic_correlations(
                     clinical_suggestion=f"Monitor biometric responses carefully when experiencing {tag_label.lower()}."
                 ))
 
-    # 7. Rote Memory Incremental Continuation
+    # 7. Rote Memory Incremental Continuation & Correlation Bank
     rote_mem = stats.get("rote_memory")
-    if rote_mem and rote_mem.get("session_resumed"):
+    session_resumed = bool(rote_mem.get("session_resumed")) if (rote_mem and isinstance(rote_mem, dict)) else False
+
+    if rote_mem and session_resumed:
         shift_txt = rote_mem.get("trajectory_shift_summary") or f"{rote_mem.get('delta_readings_count')} new reading(s) integrated since previous session."
         correlations.insert(0, CorrelationItem(
             category="longitudinal_trend",
@@ -896,27 +1134,20 @@ def generate_heuristic_correlations(
             clinical_suggestion="Continue regular logging to maintain longitudinal pattern tracking across sessions."
         ))
 
-    # Construct synthesized clinical summary
-    doc_summary_lines = []
-    if rote_mem and rote_mem.get("session_resumed"):
-        doc_summary_lines.append(
-            f"[Resumed Session] Continuing from previous evaluation on {rote_mem.get('last_checkpoint_at')}. {rote_mem.get('trajectory_shift_summary', '')}"
-        )
-    if stats.get("total_bp_readings"):
-        doc_summary_lines.append(
-            f"Over {stats['total_bp_readings']} total blood pressure measurements, patient demonstrates an average reading of {stats.get('avg_systolic', 'N/A')}/{stats.get('avg_diastolic', 'N/A')} mmHg."
-        )
-    if stats.get("total_glucose_readings"):
-        doc_summary_lines.append(
-            f"Over {stats['total_glucose_readings']} glucose readings, mean concentration is {stats.get('avg_glucose_mg_dl', 'N/A')} mg/dL."
-        )
-    if correlations:
-        top_headlines = "; ".join([f"'{c.headline}'" for c in correlations[:3]])
-        doc_summary_lines.append(f"Key data-driven correlations identified include: {top_headlines}.")
-    else:
-        doc_summary_lines.append("No significant confounding or cross-stream anomalies were observed within the current logging period.")
+    prior_bank = rote_mem.get("correlation_bank") if (rote_mem and isinstance(rote_mem, dict)) else None
+    reinforced_correlations, updated_bank = reinforce_correlation_bank(
+        prior_bank=prior_bank,
+        current_correlations=correlations,
+        session_resumed=session_resumed
+    )
+    correlations = reinforced_correlations
 
-    doctor_summary = " ".join(doc_summary_lines)
+    if rote_mem and isinstance(rote_mem, dict):
+        rote_mem["correlation_bank"] = updated_bank
+        if "accumulators" in stats and not rote_mem.get("accumulators"):
+            rote_mem["accumulators"] = stats["accumulators"]
+
+    doctor_summary = generate_progressive_doctor_summary(stats, correlations, rote_mem)
 
     now_iso = datetime.now(timezone.utc).isoformat()
     return HealthAnalysisResponse(
@@ -1266,6 +1497,18 @@ def generate_correlation_insights(
             e_bp = stats.get("evening_avg_bp")
 
             rote_mem = stats.get("rote_memory")
+            session_resumed = bool(rote_mem.get("session_resumed")) if (rote_mem and isinstance(rote_mem, dict)) else False
+            if rote_mem and isinstance(rote_mem, dict):
+                prior_bank = rote_mem.get("correlation_bank")
+                correlations, updated_bank = reinforce_correlation_bank(
+                    prior_bank=prior_bank,
+                    current_correlations=correlations,
+                    session_resumed=session_resumed
+                )
+                rote_mem["correlation_bank"] = updated_bank
+                if "accumulators" in stats and not rote_mem.get("accumulators"):
+                    rote_mem["accumulators"] = stats["accumulators"]
+
             return HealthAnalysisResponse(
                 user_id=user_id,
                 generated_at=now_iso,
@@ -1351,78 +1594,176 @@ def get_or_compute_analysis(
         except Exception as cache_err:
             print(f"[AnalysisService] Cache read notice: {cache_err}. Computing fresh analysis.")
 
-    # 2. Fetch all user measurements for aggregation
-    bp_records: List[Dict[str, Any]] = []
-    glucose_records: List[Dict[str, Any]] = []
-    weight_records: List[Dict[str, Any]] = []
+    # 2. Fetch measurements & evaluate: Incremental Rote vs Full Fetch
+    prior_rote = prior_checkpoint_data.get("rote_memory", {}) if (prior_checkpoint_data and isinstance(prior_checkpoint_data.get("rote_memory"), dict)) else {}
+    prior_accumulators = prior_rote.get("accumulators") or (prior_checkpoint_data.get("stats", {}).get("accumulators") if (prior_checkpoint_data and isinstance(prior_checkpoint_data.get("stats"), dict)) else None)
+    prior_gen_at = str(prior_checkpoint_data.get("generated_at", "")) if (prior_checkpoint_data and prior_checkpoint_data.get("generated_at")) else None
 
-    if db is not None:
+    use_incremental = (
+        not force_refresh
+        and prior_checkpoint_data is not None
+        and prior_accumulators is not None
+        and bool(prior_gen_at)
+        and db is not None
+    )
+
+    stats = None
+
+    if use_incremental:
+        delta_bp_records: List[Dict[str, Any]] = []
+        delta_glucose_records: List[Dict[str, Any]] = []
+        delta_weight_records: List[Dict[str, Any]] = []
+        fetch_success = False
+
         try:
             m_ref = db.collection("profiles").document(user_id).collection("measurements")
-            docs = m_ref.limit(200).stream()
-            for doc in docs:
+            # Query only delta documents created strictly after prior checkpoint
+            delta_docs = m_ref.where("created_at", ">", prior_gen_at).stream()
+            for doc in delta_docs:
                 item = doc.to_dict()
                 m_type = item.get("measurement_type")
                 if m_type == "blood_pressure":
-                    bp_records.append(item)
+                    delta_bp_records.append(item)
                 elif m_type == "blood_glucose":
-                    glucose_records.append(item)
+                    delta_glucose_records.append(item)
 
-            # Weight history
             w_ref = db.collection("profiles").document(user_id).collection("weight_history")
-            w_docs = w_ref.limit(50).stream()
-            weight_records = [w.to_dict() for w in w_docs]
-        except Exception as fetch_err:
-            print(f"[AnalysisService] Error reading user measurements: {fetch_err}")
+            w_docs = w_ref.where("recorded_at", ">", prior_gen_at).stream()
+            delta_weight_records = [w.to_dict() for w in w_docs]
+            fetch_success = True
+        except Exception as delta_fetch_err:
+            print(f"[AnalysisService] Notice: Delta fetch fallback to full fetch: {delta_fetch_err}")
+            fetch_success = False
 
-    # 3. Pre-aggregate and calculate incremental rote memory deltas
-    stats = preaggregate_health_data(bp_records, glucose_records, weight_records)
+        if fetch_success:
+            delta_count = len(delta_bp_records) + len(delta_glucose_records)
+            # If 0 new measurements were logged, short-circuit and return cached analysis (0 reads / 0 ms)
+            if delta_count == 0 and len(delta_weight_records) == 0:
+                resp = HealthAnalysisResponse(**prior_checkpoint_data)
+                resp.is_cached = True
+                return resp
 
-    # Rote State Resumption: Pick up from where left off
-    if prior_checkpoint_data and isinstance(prior_checkpoint_data, dict):
-        prior_stats = prior_checkpoint_data.get("stats", {}) if isinstance(prior_checkpoint_data.get("stats"), dict) else {}
-        prior_patterns = prior_checkpoint_data.get("patterns", {}) if isinstance(prior_checkpoint_data.get("patterns"), dict) else {}
-        prior_gen_at = str(prior_checkpoint_data.get("generated_at", "")) if prior_checkpoint_data.get("generated_at") else None
-        
-        prior_sys = prior_stats.get("avg_systolic") if isinstance(prior_stats.get("avg_systolic"), (int, float)) else None
-        prior_glu = prior_stats.get("avg_glucose_mg_dl") if isinstance(prior_stats.get("avg_glucose_mg_dl"), (int, float)) else None
-        bp_t = prior_patterns.get("bp_trend", {}) if isinstance(prior_patterns.get("bp_trend"), dict) else {}
-        prior_trend = str(bp_t.get("trend_label", "")) if bp_t.get("trend_label") else None
+            # Update running statistics in O(k) time
+            prior_stats = prior_checkpoint_data.get("stats", {}) if isinstance(prior_checkpoint_data.get("stats"), dict) else {}
+            stats = update_running_stats(
+                prior_stats=prior_stats,
+                prior_accumulators=prior_accumulators,
+                delta_bp_records=delta_bp_records,
+                delta_glucose_records=delta_glucose_records,
+                delta_weight_records=delta_weight_records
+            )
 
-        # Count delta measurements recorded strictly after prior checkpoint
-        delta_bp = sum(1 for r in bp_records if str(r.get("created_at") or r.get("recorded_at", "")) > (prior_gen_at or ""))
-        delta_glu = sum(1 for g in glucose_records if str(g.get("created_at") or g.get("recorded_at", "")) > (prior_gen_at or ""))
-        delta_count = delta_bp + delta_glu
+            prior_sys = prior_stats.get("avg_systolic") if isinstance(prior_stats.get("avg_systolic"), (int, float)) else None
+            prior_glu = prior_stats.get("avg_glucose_mg_dl") if isinstance(prior_stats.get("avg_glucose_mg_dl"), (int, float)) else None
+            prior_patterns = prior_checkpoint_data.get("patterns", {}) if isinstance(prior_checkpoint_data.get("patterns"), dict) else {}
+            bp_t = prior_patterns.get("bp_trend", {}) if isinstance(prior_patterns.get("bp_trend"), dict) else {}
+            prior_trend = str(bp_t.get("trend_label", "")) if bp_t.get("trend_label") else None
 
-        current_sys = stats.get("avg_systolic")
-        if current_sys is not None and prior_sys is not None and delta_count > 0:
-            diff_sys = round(current_sys - prior_sys, 1)
-            dir_text = f"+{diff_sys} mmHg shift" if diff_sys > 0 else f"{diff_sys} mmHg shift" if diff_sys < 0 else "unchanged"
-            shift_summary = f"Integrated {delta_count} new reading(s). Baseline systolic shifted from {prior_sys} to {current_sys} mmHg ({dir_text})."
-        elif delta_count > 0:
-            shift_summary = f"Integrated {delta_count} new reading(s) onto prior baseline."
+            current_sys = stats.get("avg_systolic")
+            if current_sys is not None and prior_sys is not None and delta_count > 0:
+                diff_sys = round(current_sys - prior_sys, 1)
+                dir_text = f"+{diff_sys} mmHg shift" if diff_sys > 0 else f"{diff_sys} mmHg shift" if diff_sys < 0 else "unchanged"
+                shift_summary = f"Integrated {delta_count} new reading(s). Baseline systolic shifted from {prior_sys} to {current_sys} mmHg ({dir_text})."
+            elif delta_count > 0:
+                shift_summary = f"Integrated {delta_count} new reading(s) onto prior baseline."
+            else:
+                shift_summary = "Re-evaluating longitudinal baseline with existing data."
+
+            prior_bank = prior_rote.get("correlation_bank") or (prior_checkpoint_data.get("correlation_bank") if isinstance(prior_checkpoint_data.get("correlation_bank"), dict) else {})
+            prior_version = int(prior_rote.get("checkpoint_version", 1))
+
+            stats["rote_memory"] = {
+                "session_resumed": True,
+                "last_checkpoint_at": prior_gen_at,
+                "delta_readings_count": delta_count,
+                "prior_baseline_systolic": prior_sys,
+                "prior_baseline_glucose": prior_glu,
+                "prior_trajectory_trend": prior_trend,
+                "trajectory_shift_summary": shift_summary,
+                "accumulators": stats.get("accumulators"),
+                "correlation_bank": prior_bank,
+                "checkpoint_version": prior_version + 1
+            }
         else:
-            shift_summary = "Re-evaluating longitudinal baseline with existing data."
+            use_incremental = False
 
-        stats["rote_memory"] = {
-            "session_resumed": True,
-            "last_checkpoint_at": prior_gen_at,
-            "delta_readings_count": delta_count,
-            "prior_baseline_systolic": prior_sys,
-            "prior_baseline_glucose": prior_glu,
-            "prior_trajectory_trend": prior_trend,
-            "trajectory_shift_summary": shift_summary
-        }
-    else:
-        stats["rote_memory"] = {
-            "session_resumed": False,
-            "last_checkpoint_at": None,
-            "delta_readings_count": stats.get("total_bp_readings", 0) + stats.get("total_glucose_readings", 0),
-            "prior_baseline_systolic": None,
-            "prior_baseline_glucose": None,
-            "prior_trajectory_trend": None,
-            "trajectory_shift_summary": "Initial baseline established."
-        }
+    if not use_incremental:
+        # Full historical fetch (initial baseline, forced refresh, or legacy checkpoint missing accumulators)
+        bp_records: List[Dict[str, Any]] = []
+        glucose_records: List[Dict[str, Any]] = []
+        weight_records: List[Dict[str, Any]] = []
+
+        if db is not None:
+            try:
+                m_ref = db.collection("profiles").document(user_id).collection("measurements")
+                docs = m_ref.limit(200).stream()
+                for doc in docs:
+                    item = doc.to_dict()
+                    m_type = item.get("measurement_type")
+                    if m_type == "blood_pressure":
+                        bp_records.append(item)
+                    elif m_type == "blood_glucose":
+                        glucose_records.append(item)
+
+                # Weight history
+                w_ref = db.collection("profiles").document(user_id).collection("weight_history")
+                w_docs = w_ref.limit(50).stream()
+                weight_records = [w.to_dict() for w in w_docs]
+            except Exception as fetch_err:
+                print(f"[AnalysisService] Error reading user measurements: {fetch_err}")
+
+        stats = preaggregate_health_data(bp_records, glucose_records, weight_records)
+
+        if prior_checkpoint_data and isinstance(prior_checkpoint_data, dict):
+            prior_stats = prior_checkpoint_data.get("stats", {}) if isinstance(prior_checkpoint_data.get("stats"), dict) else {}
+            prior_patterns = prior_checkpoint_data.get("patterns", {}) if isinstance(prior_checkpoint_data.get("patterns"), dict) else {}
+            prior_sys = prior_stats.get("avg_systolic") if isinstance(prior_stats.get("avg_systolic"), (int, float)) else None
+            prior_glu = prior_stats.get("avg_glucose_mg_dl") if isinstance(prior_stats.get("avg_glucose_mg_dl"), (int, float)) else None
+            bp_t = prior_patterns.get("bp_trend", {}) if isinstance(prior_patterns.get("bp_trend"), dict) else {}
+            prior_trend = str(bp_t.get("trend_label", "")) if bp_t.get("trend_label") else None
+
+            delta_bp = sum(1 for r in bp_records if str(r.get("created_at") or r.get("recorded_at", "")) > (prior_gen_at or ""))
+            delta_glu = sum(1 for g in glucose_records if str(g.get("created_at") or g.get("recorded_at", "")) > (prior_gen_at or ""))
+            delta_count = delta_bp + delta_glu
+
+            current_sys = stats.get("avg_systolic")
+            if current_sys is not None and prior_sys is not None and delta_count > 0:
+                diff_sys = round(current_sys - prior_sys, 1)
+                dir_text = f"+{diff_sys} mmHg shift" if diff_sys > 0 else f"{diff_sys} mmHg shift" if diff_sys < 0 else "unchanged"
+                shift_summary = f"Integrated {delta_count} new reading(s). Baseline systolic shifted from {prior_sys} to {current_sys} mmHg ({dir_text})."
+            elif delta_count > 0:
+                shift_summary = f"Integrated {delta_count} new reading(s) onto prior baseline."
+            else:
+                shift_summary = "Re-evaluating longitudinal baseline with existing data."
+
+            prior_bank = prior_rote.get("correlation_bank") or (prior_checkpoint_data.get("correlation_bank") if isinstance(prior_checkpoint_data.get("correlation_bank"), dict) else {})
+            prior_version = int(prior_rote.get("checkpoint_version", 1))
+
+            stats["rote_memory"] = {
+                "session_resumed": True,
+                "last_checkpoint_at": prior_gen_at,
+                "delta_readings_count": delta_count,
+                "prior_baseline_systolic": prior_sys,
+                "prior_baseline_glucose": prior_glu,
+                "prior_trajectory_trend": prior_trend,
+                "trajectory_shift_summary": shift_summary,
+                "accumulators": stats.get("accumulators"),
+                "correlation_bank": prior_bank,
+                "checkpoint_version": prior_version + 1
+            }
+        else:
+            stats["rote_memory"] = {
+                "session_resumed": False,
+                "last_checkpoint_at": None,
+                "delta_readings_count": stats.get("total_bp_readings", 0) + stats.get("total_glucose_readings", 0),
+                "prior_baseline_systolic": None,
+                "prior_baseline_glucose": None,
+                "prior_trajectory_trend": None,
+                "trajectory_shift_summary": "Initial baseline established.",
+                "accumulators": stats.get("accumulators"),
+                "correlation_bank": {},
+                "checkpoint_version": 1
+            }
 
     analysis = generate_correlation_insights(user_id, stats)
 

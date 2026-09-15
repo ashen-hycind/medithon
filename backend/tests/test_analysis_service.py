@@ -14,6 +14,9 @@ from services.analysis_service import (
     generate_heuristic_correlations,
     generate_correlation_insights,
     get_or_compute_analysis,
+    update_running_stats,
+    reinforce_correlation_bank,
+    generate_progressive_doctor_summary,
     _clean_json_string
 )
 
@@ -556,6 +559,279 @@ class TestRoteMemoryIntegration(unittest.TestCase):
             self.assertTrue(res.rote_memory.session_resumed)
             self.assertEqual(res.rote_memory.delta_readings_count, 1)
             self.assertEqual(res.rote_memory.prior_baseline_systolic, 130.0)
+
+    def test_update_running_stats_mathematical_precision(self):
+        # 4 historical BP readings + 2 historical glucose readings
+        bp_history = [
+            {"id": "bp1", "recorded_at": "2026-09-10T08:00:00Z", "values": {"systolic": 120, "diastolic": 80, "pulse": 70}, "issues": []},
+            {"id": "bp2", "recorded_at": "2026-09-11T08:30:00Z", "values": {"systolic": 130, "diastolic": 84, "pulse": 72}, "issues": []},
+            {"id": "bp3", "recorded_at": "2026-09-12T19:00:00Z", "values": {"systolic": 126, "diastolic": 82, "pulse": 68}, "issues": []},
+            {"id": "bp4", "recorded_at": "2026-09-13T20:00:00Z", "values": {"systolic": 134, "diastolic": 86, "pulse": 74}, "issues": [{"tag": "caffeine_intake"}]},
+        ]
+        glu_history = [
+            {"id": "g1", "recorded_at": "2026-09-10T07:30:00Z", "values": {"glucose_value": 90, "unit": "mg/dL"}, "meal_context": "fasting"},
+            {"id": "g2", "recorded_at": "2026-09-11T12:30:00Z", "values": {"glucose_value": 140, "unit": "mg/dL"}, "meal_context": "after_meal"},
+        ]
+
+        # 2 new delta BP readings + 1 new delta glucose reading
+        bp_delta = [
+            {"id": "bp5", "recorded_at": "2026-09-14T08:15:00Z", "values": {"systolic": 138, "diastolic": 88, "pulse": 76}, "issues": []},
+            {"id": "bp6", "recorded_at": "2026-09-15T09:00:00Z", "values": {"systolic": 142, "diastolic": 90, "pulse": 80}, "issues": [{"tag": "caffeine_intake"}]},
+        ]
+        glu_delta = [
+            {"id": "g3", "recorded_at": "2026-09-14T07:45:00Z", "values": {"glucose_value": 110, "unit": "mg/dL"}, "meal_context": "fasting"},
+        ]
+
+        # 1. Full aggregation across all 6 BP and 3 glucose records
+        full_stats = preaggregate_health_data(bp_history + bp_delta, glu_history + glu_delta)
+
+        # 2. Baseline aggregation on history, then incremental O(k) update with delta
+        prior_stats = preaggregate_health_data(bp_history, glu_history)
+        prior_accumulators = prior_stats["accumulators"]
+        incremental_stats = update_running_stats(
+            prior_stats=prior_stats,
+            prior_accumulators=prior_accumulators,
+            delta_bp_records=bp_delta,
+            delta_glucose_records=glu_delta
+        )
+
+        # Assert identical mathematical precision
+        self.assertEqual(incremental_stats["total_bp_readings"], full_stats["total_bp_readings"])
+        self.assertEqual(incremental_stats["total_glucose_readings"], full_stats["total_glucose_readings"])
+        self.assertEqual(incremental_stats["avg_systolic"], full_stats["avg_systolic"])
+        self.assertEqual(incremental_stats["avg_diastolic"], full_stats["avg_diastolic"])
+        self.assertEqual(incremental_stats["avg_pulse"], full_stats["avg_pulse"])
+        self.assertEqual(incremental_stats["avg_glucose_mg_dl"], full_stats["avg_glucose_mg_dl"])
+        self.assertEqual(incremental_stats["morning_avg_bp"], full_stats["morning_avg_bp"])
+        self.assertEqual(incremental_stats["evening_avg_bp"], full_stats["evening_avg_bp"])
+        self.assertEqual(incremental_stats["fasting_avg_glucose"], full_stats["fasting_avg_glucose"])
+        self.assertEqual(incremental_stats["post_meal_avg_glucose"], full_stats["post_meal_avg_glucose"])
+
+    def test_reinforce_correlation_bank_evolution(self):
+        item = CorrelationItem(
+            category="lifestyle_trigger",
+            confidence="moderate",
+            headline="Caffeine Intake Associated with Systolic BP Elevation",
+            explanation="Systolic was +12 mmHg higher during caffeine intake.",
+            evidence_count=1,
+            clinical_suggestion="Limit caffeine prior to BP measurements."
+        )
+
+        # Initial detection (not session resumed)
+        corrs1, bank1 = reinforce_correlation_bank(None, [item], session_resumed=False)
+        self.assertEqual(len(corrs1), 1)
+        self.assertEqual(len(bank1), 1)
+        key = list(bank1.keys())[0]
+        self.assertEqual(bank1[key]["evidence_count"], 1)
+        self.assertEqual(bank1[key]["reinforcement_count"], 1)
+
+        # Second session resumed (reinforced)
+        corrs2, bank2 = reinforce_correlation_bank(bank1, [item], session_resumed=True)
+        self.assertEqual(len(corrs2), 1)
+        self.assertEqual(bank2[key]["evidence_count"], 2)
+        self.assertEqual(bank2[key]["reinforcement_count"], 2)
+        self.assertIn("[Reinforced across 2 cumulative logs]", corrs2[0].explanation)
+
+        # Third session resumed (reinforced to high confidence)
+        corrs3, bank3 = reinforce_correlation_bank(bank2, [item], session_resumed=True)
+        self.assertEqual(bank3[key]["evidence_count"], 3)
+        self.assertEqual(bank3[key]["reinforcement_count"], 3)
+        self.assertEqual(corrs3[0].confidence, "high")
+        self.assertIn("[Reinforced across 3 cumulative logs]", corrs3[0].explanation)
+
+    def test_generate_progressive_doctor_summary(self):
+        stats = {
+            "total_bp_readings": 10,
+            "total_glucose_readings": 6,
+            "avg_systolic": 136.0,
+            "avg_diastolic": 86.0,
+            "avg_glucose_mg_dl": 115.0
+        }
+        item = CorrelationItem(
+            category="lifestyle_trigger",
+            confidence="high",
+            headline="Caffeine Spike",
+            explanation="Caffeine caused +14 mmHg.",
+            evidence_count=3,
+            clinical_suggestion="Reduce caffeine."
+        )
+
+        # Baseline summary format
+        summary_baseline = generate_progressive_doctor_summary(stats, [item], rote_memory=None)
+        self.assertIn("Baseline Clinical Evaluation", summary_baseline)
+        self.assertIn("136.0/86.0 mmHg", summary_baseline)
+        self.assertIn("Caffeine Spike", summary_baseline)
+
+        # Progressive resumed summary format
+        rote_mem = {
+            "session_resumed": True,
+            "last_checkpoint_at": "2026-09-15T12:00:00Z",
+            "delta_readings_count": 2,
+            "trajectory_shift_summary": "Baseline systolic shifted from 132.0 to 136.0 mmHg (+4.0 mmHg shift)."
+        }
+        summary_resumed = generate_progressive_doctor_summary(stats, [item], rote_memory=rote_mem)
+        self.assertIn("Progressive Longitudinal Clinical Evaluation", summary_resumed)
+        self.assertIn("2026-09-15T12:00:00Z", summary_resumed)
+        self.assertIn("2 new reading(s) were recorded", summary_resumed)
+        self.assertIn("+4.0 mmHg shift", summary_resumed)
+
+    def test_get_or_compute_analysis_incremental_delta_fetch(self):
+        user_id = "user_delta_test"
+        mock_db = MagicMock()
+        mock_profile_doc = MagicMock()
+        mock_db.collection.return_value.document.return_value = mock_profile_doc
+
+        recent_time = "2026-09-15T10:00:00+00:00"
+        prior_accumulators = {
+            "bp_count": 2,
+            "sys_sum": 260.0,
+            "dia_sum": 164.0,
+            "pulse_count": 2,
+            "pulse_sum": 150.0,
+            "morning_count": 0,
+            "morning_sys_sum": 0.0,
+            "morning_dia_sum": 0.0,
+            "evening_count": 0,
+            "evening_sys_sum": 0.0,
+            "evening_dia_sum": 0.0,
+            "glucose_count": 0,
+            "glucose_sum": 0.0,
+            "fasting_count": 0,
+            "fasting_sum": 0.0,
+            "post_meal_count": 0,
+            "post_meal_sum": 0.0,
+            "baseline_sys_count": 2,
+            "baseline_sys_sum": 260.0,
+            "confounder_counts": {}
+        }
+        cached_data = {
+            "user_id": user_id,
+            "generated_at": recent_time,
+            "is_cached": False,
+            "stats": {
+                "total_bp_readings": 2,
+                "total_glucose_readings": 0,
+                "avg_systolic": 130.0,
+                "avg_diastolic": 82.0,
+                "accumulators": prior_accumulators
+            },
+            "rote_memory": {
+                "session_resumed": False,
+                "last_checkpoint_at": None,
+                "delta_readings_count": 2,
+                "accumulators": prior_accumulators,
+                "correlation_bank": {},
+                "checkpoint_version": 1
+            },
+            "correlations": [],
+            "urgent_alerts": [],
+            "doctor_summary": "Prior summary."
+        }
+
+        mock_analysis_doc = MagicMock()
+        mock_analysis_doc.exists = True
+        mock_analysis_doc.to_dict.return_value = cached_data
+
+        # Delta query returns 1 new measurement: SYS=142, DIA=88, PULSE=76
+        mock_delta_bp = MagicMock()
+        mock_delta_bp.to_dict.return_value = {
+            "id": "bp_delta_1",
+            "created_at": "2026-09-16T12:00:00+00:00",
+            "recorded_at": "2026-09-16T12:00:00+00:00",
+            "measurement_type": "blood_pressure",
+            "values": {"systolic": 142, "diastolic": 88, "pulse": 76}
+        }
+
+        analysis_coll = MagicMock()
+        analysis_coll.document.return_value.get.return_value = mock_analysis_doc
+
+        measurements_coll = MagicMock()
+        measurements_coll.where.return_value.stream.return_value = [mock_delta_bp]
+        measurements_coll.where.return_value.limit.return_value.stream.return_value = [mock_delta_bp]
+
+        def get_subcollection(name):
+            if name == "analysis":
+                return analysis_coll
+            elif name == "measurements":
+                return measurements_coll
+            elif name == "weight_history":
+                w_coll = MagicMock()
+                w_coll.where.return_value.stream.return_value = []
+                return w_coll
+            return MagicMock()
+
+        mock_profile_doc.collection.side_effect = get_subcollection
+
+        with patch("services.analysis_service.get_gemini_client", return_value=None):
+            res = get_or_compute_analysis(user_id=user_id, db=mock_db, force_refresh=False)
+            self.assertFalse(res.is_cached)
+            self.assertIsNotNone(res.rote_memory)
+            self.assertTrue(res.rote_memory.session_resumed)
+            self.assertEqual(res.rote_memory.delta_readings_count, 1)
+            self.assertEqual(res.rote_memory.prior_baseline_systolic, 130.0)
+            self.assertEqual(res.rote_memory.checkpoint_version, 2)
+            # New avg systolic: (260 + 142) / 3 = 402 / 3 = 134.0
+            self.assertEqual(res.stats.avg_systolic, 134.0)
+            self.assertEqual(res.stats.total_bp_readings, 3)
+            self.assertIn("Baseline systolic shifted from 130.0 to 134.0 mmHg (+4.0 mmHg shift)", res.rote_memory.trajectory_shift_summary)
+            # Assert cache save was called
+            analysis_coll.document.return_value.set.assert_called_once()
+
+    def test_get_or_compute_analysis_incremental_short_circuits_when_zero_deltas(self):
+        user_id = "user_zero_delta"
+        mock_db = MagicMock()
+        mock_profile_doc = MagicMock()
+        mock_db.collection.return_value.document.return_value = mock_profile_doc
+
+        # Checkpoint generated 2 hours ago (cache expired > 1 hour)
+        past_time = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        prior_accumulators = {
+            "bp_count": 2, "sys_sum": 240.0, "dia_sum": 160.0, "pulse_count": 2, "pulse_sum": 140.0,
+            "morning_count": 0, "morning_sys_sum": 0.0, "morning_dia_sum": 0.0,
+            "evening_count": 0, "evening_sys_sum": 0.0, "evening_dia_sum": 0.0,
+            "glucose_count": 0, "glucose_sum": 0.0, "fasting_count": 0, "fasting_sum": 0.0,
+            "post_meal_count": 0, "post_meal_sum": 0.0, "baseline_sys_count": 2, "baseline_sys_sum": 240.0,
+            "confounder_counts": {}
+        }
+        cached_data = {
+            "user_id": user_id,
+            "generated_at": past_time,
+            "is_cached": False,
+            "stats": {"total_bp_readings": 2, "total_glucose_readings": 0, "avg_systolic": 120.0, "accumulators": prior_accumulators},
+            "rote_memory": {"session_resumed": False, "accumulators": prior_accumulators, "checkpoint_version": 1},
+            "correlations": [],
+            "urgent_alerts": [],
+            "doctor_summary": "Zero delta cached summary."
+        }
+
+        mock_analysis_doc = MagicMock()
+        mock_analysis_doc.exists = True
+        mock_analysis_doc.to_dict.return_value = cached_data
+
+        analysis_coll = MagicMock()
+        analysis_coll.document.return_value.get.return_value = mock_analysis_doc
+
+        measurements_coll = MagicMock()
+        measurements_coll.where.return_value.stream.return_value = []
+
+        def get_subcollection(name):
+            if name == "analysis":
+                return analysis_coll
+            elif name == "measurements":
+                return measurements_coll
+            elif name == "weight_history":
+                w_coll = MagicMock()
+                w_coll.where.return_value.stream.return_value = []
+                return w_coll
+            return MagicMock()
+
+        mock_profile_doc.collection.side_effect = get_subcollection
+
+        res = get_or_compute_analysis(user_id=user_id, db=mock_db, force_refresh=False)
+        # Should short-circuit and return cached analysis with is_cached=True
+        self.assertTrue(res.is_cached)
+        self.assertEqual(res.doctor_summary, "Zero delta cached summary.")
+        self.assertEqual(res.stats.avg_systolic, 120.0)
 
 
 if __name__ == "__main__":

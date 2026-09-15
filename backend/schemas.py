@@ -227,6 +227,9 @@ class RoteMemoryState(BaseModel):
     prior_baseline_glucose: Optional[float] = None
     prior_trajectory_trend: Optional[str] = None
     trajectory_shift_summary: Optional[str] = None
+    accumulators: Optional[dict[str, Any]] = None
+    correlation_bank: Optional[dict[str, Any]] = None
+    checkpoint_version: int = 1
 
 class HealthAnalysisResponse(BaseModel):
     user_id: str
