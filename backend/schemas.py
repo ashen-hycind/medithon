@@ -1,4 +1,4 @@
-﻿from typing import Optional, Literal
+from typing import Optional, Literal
 from pydantic import BaseModel, Field, model_validator
 from datetime import datetime
 
@@ -53,3 +53,86 @@ class UserAuthResponse(BaseModel):
     uid: str
     email: Optional[str]
     has_profile: bool
+
+
+# =====================================================================
+# Blood Pressure & Clinical Issues Schemas
+# =====================================================================
+
+IssueCategory = Literal[
+    "symptom",              # headache, dizziness, vision change, chest pain
+    "lifestyle",            # poor sleep, high stress, high salt
+    "medication",           # OTC NSAIDs (Advil), decongestants, BP meds, supplements
+    "testing_condition",    # caffeine <30m, smoked, exercised, anxious/rushed
+    "device_problem",       # cuff too loose, battery low
+    "other"
+]
+
+class BloodPressureValues(BaseModel):
+    systolic: int = Field(..., ge=40, le=300, description="Systolic blood pressure in mmHg")
+    diastolic: int = Field(..., ge=30, le=200, description="Diastolic blood pressure in mmHg")
+    pulse: Optional[int] = Field(None, ge=30, le=250, description="Pulse rate in bpm")
+
+    @model_validator(mode="after")
+    def validate_pressure_differential(self):
+        if self.systolic <= self.diastolic:
+            raise ValueError("Systolic pressure must be strictly greater than diastolic pressure.")
+        return self
+
+class ExtractedIssue(BaseModel):
+    category: IssueCategory = Field(..., description="Classification category")
+    tag: str = Field(..., description="Standardized machine tag e.g. 'caffeine_intake', 'headache', 'otc_nsaid'")
+    label: str = Field(..., description="User-friendly display label e.g. 'Caffeine within 30 min', 'Headache'")
+    user_detail: Optional[str] = Field(None, description="Extracted detail or snippet from user text")
+    is_red_flag: bool = Field(False, description="True if symptom represents an acute hypertensive crisis emergency warning")
+    severity: Optional[Literal["mild", "moderate", "severe"]] = None
+
+class ImageQualityReport(BaseModel):
+    is_readable: bool = True
+    glare_detected: bool = False
+    display_cut_off: bool = False
+    issues: list[str] = Field(default_factory=list)
+
+class ScanExtractionResponse(BaseModel):
+    scan_id: str
+    detected_type: Literal["blood_pressure"] = "blood_pressure"
+    device_name: Optional[str] = Field(None, description="e.g. Omron HEM-7120, Beurer BM 28")
+    values: BloodPressureValues
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    quality: ImageQualityReport
+    raw_detected_text: Optional[str] = None
+
+class ExtractIssuesRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=2000, description="Free-form user note about symptoms, lifestyle, medications, or testing conditions")
+
+class ExtractIssuesResponse(BaseModel):
+    raw_text: str
+    issues: list[ExtractedIssue] = Field(default_factory=list)
+    has_red_flags: bool = False
+
+class BloodPressureMeasurementCreate(BaseModel):
+    recorded_at: Optional[str] = Field(None, description="ISO 8601 timestamp of measurement")
+    values: BloodPressureValues
+    raw_user_notes: Optional[str] = Field(None, description="Unfiltered user notes/sentences")
+    issues: list[ExtractedIssue] = Field(default_factory=list, description="Extracted or user-confirmed clinical issues")
+    source: Literal["camera", "screenshot", "manual"] = "camera"
+    scan_id: Optional[str] = None
+    device_model: Optional[str] = None
+
+class BloodPressureMeasurementResponse(BaseModel):
+    id: str
+    user_id: str
+    recorded_at: str
+    values: BloodPressureValues
+    units: dict[str, str] = Field(default_factory=lambda: {"systolic": "mmHg", "diastolic": "mmHg", "pulse": "bpm"})
+    clinical_stage: str # "Normal", "Elevated", "Stage 1", "Stage 2", "Hypertensive Crisis"
+    has_red_flags: bool = False
+    safety_alerts: list[str] = Field(default_factory=list)
+    raw_user_notes: Optional[str] = None
+    issues: list[ExtractedIssue] = Field(default_factory=list)
+    source: str
+    scan_id: Optional[str] = None
+    device_model: Optional[str] = None
+    created_at: str
+    updated_at: str
+
