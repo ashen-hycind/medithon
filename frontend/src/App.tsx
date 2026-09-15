@@ -10,6 +10,7 @@ import { Activity, LogOut, PlusCircle, FileText, Camera, Upload, Scale, Sparkles
 import { ScanModal } from './components/ScanModal';
 import { BloodPressureTimeline } from './components/BloodPressureTimeline';
 import { BloodGlucoseTimeline } from './components/BloodGlucoseTimeline';
+import { AIInsightsCard } from './components/AIInsightsCard';
 import { getBloodPressureMeasurements, getBloodGlucoseMeasurements } from './services/measurementService';
 
 export function App() {
@@ -31,6 +32,7 @@ export function App() {
   const [measurementsLoading, setMeasurementsLoading] = useState(false);
   const [showScanModal, setShowScanModal] = useState(false);
   const [scanDefaultDevice, setScanDefaultDevice] = useState<'blood_pressure' | 'blood_glucose'>('blood_pressure');
+  const [insightsRefreshTrigger, setInsightsRefreshTrigger] = useState(0);
 
   const loadMeasurements = async (authToken: string) => {
     setMeasurementsLoading(true);
@@ -364,15 +366,7 @@ export function App() {
           </div>
 
           <div className="space-y-6">
-            <div className="bg-[#1b5879] text-white rounded-2xl p-6 shadow-md">
-              <div className="flex items-center gap-2 text-teal-300 text-xs font-bold uppercase tracking-wider mb-2">
-                <Sparkles className="w-4 h-4" /> Grounded AI Insights
-              </div>
-              <h4 className="text-sm font-semibold mb-2">Deterministic Trend Engine</h4>
-              <p className="text-xs text-slate-200 leading-relaxed">
-                As soon as you log readings, our deterministic engine calculates rolling averages and flags trends, which the AI explains without making unauthorized medical diagnoses.
-              </p>
-            </div>
+            <AIInsightsCard token={token} refreshTrigger={insightsRefreshTrigger} />
 
             <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-200">
               <div className="flex items-center gap-2 mb-3">
@@ -452,6 +446,7 @@ export function App() {
               setGlucoseMeasurements(prev => [m as BloodGlucoseMeasurement, ...prev]);
               setActiveTab('blood_glucose');
             }
+            setInsightsRefreshTrigger(prev => prev + 1);
           }}
         />
       )}

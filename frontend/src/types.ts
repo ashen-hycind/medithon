@@ -130,3 +130,61 @@ export interface BloodGlucoseMeasurement {
   updated_at: string;
 }
 
+export type CorrelationCategory =
+  | 'lifestyle_trigger'
+  | 'metabolic_cardiovascular'
+  | 'symptom_spike'
+  | 'longitudinal_trend'
+  | 'medication_response'
+  | 'fluid_weight_shift'
+  | 'other';
+
+export type CorrelationConfidence = 'high' | 'moderate' | 'low';
+
+export interface CorrelationItem {
+  category: CorrelationCategory;
+  confidence: CorrelationConfidence;
+  headline: string;
+  explanation: string;
+  evidence_count: number;
+  clinical_suggestion: string;
+}
+
+export interface AnalysisStats {
+  total_bp_readings: number;
+  total_glucose_readings: number;
+  avg_systolic?: number | null;
+  avg_diastolic?: number | null;
+  avg_pulse?: number | null;
+  avg_glucose_mg_dl?: number | null;
+  morning_avg_bp?: { systolic: number; diastolic: number } | null;
+  evening_avg_bp?: { systolic: number; diastolic: number } | null;
+  fasting_avg_glucose?: number | null;
+  post_meal_avg_glucose?: number | null;
+}
+
+export interface RoteMemoryState {
+  session_resumed: boolean;
+  last_checkpoint_at?: string | null;
+  delta_readings_count: number;
+  prior_baseline_systolic?: number | null;
+  prior_baseline_glucose?: number | null;
+  prior_trajectory_trend?: string | null;
+  trajectory_shift_summary?: string | null;
+  accumulators?: Record<string, any> | null;
+  correlation_bank?: Record<string, any> | null;
+  checkpoint_version: number;
+}
+
+export interface HealthAnalysisResponse {
+  user_id: string;
+  generated_at: string;
+  is_cached: boolean;
+  stats: AnalysisStats;
+  patterns?: Record<string, any> | null;
+  rote_memory?: RoteMemoryState | null;
+  correlations: CorrelationItem[];
+  urgent_alerts: string[];
+  doctor_summary: string;
+}
+
