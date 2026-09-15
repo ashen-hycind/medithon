@@ -1,0 +1,23 @@
+﻿# Environment & Secrets
+.env
+*.env
+serviceAccountKey.json
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*.class
+venv/
+.venv/
+
+# Node
+node_modules/
+dist/
+build/
+.next/
+
+# OS
+.DS_Store
+Thumbs.db
