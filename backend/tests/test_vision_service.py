@@ -174,16 +174,27 @@ class TestScanExtractEndpoint(unittest.TestCase):
 
     def test_endpoint_valid_image_upload(self):
         import io
-        fake_png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
-        response = self.client.post(
-            "/api/scan/extract",
-            files={"file": ("monitor.png", io.BytesIO(fake_png), "image/png")}
+        from schemas import BloodPressureValues, ImageQualityReport, ScanExtractionResponse
+        mock_response = ScanExtractionResponse(
+            scan_id="scan_test_mock",
+            detected_type="blood_pressure",
+            device_name="Omron HEM-7120",
+            values=BloodPressureValues(systolic=128, diastolic=82, pulse=74),
+            confidence=0.95,
+            quality=ImageQualityReport(is_readable=True),
+            raw_detected_text="SYS 128 DIA 82 PUL 74"
         )
-        self.assertEqual(response.status_code, 200)
-        data = response.json()
-        self.assertEqual(data["detected_type"], "blood_pressure")
-        self.assertGreater(data["values"]["systolic"], data["values"]["diastolic"])
-        self.assertTrue(data["quality"]["is_readable"])
+        with patch("routes.measurements.detect_and_extract_measurement", return_value=mock_response):
+            fake_png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+            response = self.client.post(
+                "/api/scan/extract",
+                files={"file": ("monitor.png", io.BytesIO(fake_png), "image/png")}
+            )
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+            self.assertEqual(data["detected_type"], "blood_pressure")
+            self.assertGreater(data["values"]["systolic"], data["values"]["diastolic"])
+            self.assertTrue(data["quality"]["is_readable"])
 
     def test_endpoint_invalid_file_type(self):
         import io

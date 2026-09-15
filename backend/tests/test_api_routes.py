@@ -6,13 +6,15 @@ from fastapi.testclient import TestClient
 # Add backend directory to sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from unittest.mock import patch
 from main import app
 
 class TestMeasurementsApi(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
 
-    def test_extract_issues_api_endpoint(self):
+    @patch("services.gemini_service.get_gemini_client", return_value=None)
+    def test_extract_issues_api_endpoint(self, _mock_client):
         payload = {
             "text": "Had a throbbing headache, poor sleep, and drank two coffees before measuring"
         }
@@ -30,7 +32,8 @@ class TestMeasurementsApi(unittest.TestCase):
         self.assertIn("poor_sleep", tags)
         self.assertFalse(data["has_red_flags"])
 
-    def test_extract_issues_api_endpoint_red_flag(self):
+    @patch("services.gemini_service.get_gemini_client", return_value=None)
+    def test_extract_issues_api_endpoint_red_flag(self, _mock_client):
         payload = {
             "text": "Feeling terrible with sudden chest tightness and blurred vision"
         }

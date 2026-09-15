@@ -3,7 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import os
 
-load_dotenv()
+from pathlib import Path
+backend_env = Path(__file__).resolve().parent / ".env"
+load_dotenv(dotenv_path=backend_env, override=True)
+load_dotenv(override=True)
 
 from routes.users import router as users_router
 from routes.measurements import router as measurements_router

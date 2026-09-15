@@ -222,33 +222,47 @@ def extract_issues_from_text(user_text: str) -> List[ExtractedIssue]:
         # Graceful fallback for local development/testing without key
         return extract_issues_heuristic(user_text)
 
-    try:
-        model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
-            generation_config={"response_mime_type": "application/json"}
-        )
-        prompt = f"{ISSUES_EXTRACTION_PROMPT}\n\nUser Input: \"{user_text}\""
-        response = model.generate_content(prompt)
-        
-        raw_json = response.text.strip()
-        data = json.loads(raw_json)
-        
-        if not isinstance(data, list):
-            if isinstance(data, dict) and "issues" in data:
-                data = data["issues"]
-            else:
-                return extract_issues_heuristic(user_text)
+    preferred_model = os.getenv("GEMINI_MODEL")
+    candidate_models = [preferred_model] if preferred_model else [
+        "gemini-flash-latest",
+        "gemini-3.5-flash-lite",
+        "gemini-3.5-flash",
+        "gemini-3.6-flash"
+    ]
 
-        extracted: List[ExtractedIssue] = []
-        for item in data:
-            try:
-                extracted.append(ExtractedIssue(**item))
-            except ValidationError:
-                continue
-        return extracted
-    except Exception as e:
-        print(f"Gemini API call failed ({e}), falling back to heuristic extractor.")
-        return extract_issues_heuristic(user_text)
+    for model_name in candidate_models:
+        if not model_name:
+            continue
+        try:
+            model = genai.GenerativeModel(
+                model_name=model_name,
+                generation_config={"response_mime_type": "application/json"}
+            )
+            prompt = f"{ISSUES_EXTRACTION_PROMPT}\n\nUser Input: \"{user_text}\""
+            response = model.generate_content(prompt)
+            
+            raw_json = response.text.strip()
+            data = json.loads(raw_json)
+            
+            if not isinstance(data, list):
+                if isinstance(data, dict) and "issues" in data:
+                    data = data["issues"]
+                else:
+                    return extract_issues_heuristic(user_text)
+
+            extracted: List[ExtractedIssue] = []
+            for item in data:
+                try:
+                    extracted.append(ExtractedIssue(**item))
+                except ValidationError:
+                    continue
+            return extracted
+        except Exception as e:
+            print(f"[GeminiService] Model '{model_name}' failed: {e}")
+            continue
+
+    print("All Gemini models failed, falling back to heuristic extractor.")
+    return extract_issues_heuristic(user_text)
 
 def extract_blood_pressure_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> ScanExtractionResponse:
     """
@@ -292,9 +306,9 @@ def extract_blood_pressure_from_image(image_bytes: bytes, mime_type: str = "imag
 
         Ensure systolic > diastolic. Return strictly JSON matching this structure:
         {
-          "systolic": 128,
-          "diastolic": 82,
-          "pulse": 74,
+          "systolic": the val,
+          "diastolic": the val,
+          "pulse": the val,
           "device_name": "Omron HEM-7120",
           "confidence": 0.98,
           "quality": {

@@ -1,4 +1,4 @@
-﻿# Environment & Secrets
+# Environment & Secrets
 .env
 *.env
 serviceAccountKey.json
@@ -17,6 +17,10 @@ node_modules/
 dist/
 build/
 .next/
+*.tsbuildinfo
+
+# Firebase
+.firebase/
 
 # OS
 .DS_Store

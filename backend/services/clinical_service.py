@@ -1,5 +1,5 @@
-from typing import List, Tuple
-from schemas import BloodPressureValues, ExtractedIssue
+from typing import List, Tuple, Optional
+from schemas import BloodPressureValues, BloodGlucoseValues, ExtractedIssue
 
 def classify_blood_pressure(values: BloodPressureValues) -> str:
     """
@@ -64,3 +64,86 @@ def evaluate_clinical_alerts(values: BloodPressureValues, issues: List[Extracted
         )
 
     return stage, has_red_flags, alerts
+
+
+# =====================================================================
+# Blood Glucose / Diabetes Clinical Engine (ADA Standards of Care)
+# =====================================================================
+
+def classify_blood_glucose(values: BloodGlucoseValues) -> str:
+    """
+    Classifies blood glucose reading based on ADA (American Diabetes Association) Standards of Care:
+    - Normalizes mmol/L to mg/dL (1 mmol/L = 18.018 mg/dL)
+    - Severe Hypoglycemia: <54 mg/dL (<3.0 mmol/L)
+    - Hypoglycemia Alert: <70 mg/dL (<3.9 mmol/L)
+    - Normal:
+        * Fasting/Pre-meal: 70 - 99 mg/dL
+        * Post-meal / Random: 70 - 139 mg/dL
+    - Elevated:
+        * Fasting/Pre-meal: 100 - 125 mg/dL (Pre-diabetes range)
+        * Post-meal / Random: 140 - 199 mg/dL (Impaired glucose tolerance)
+    - Hyperglycemia: 200 - 299 mg/dL
+    - Hyperglycemic Crisis: >=300 mg/dL (DKA/HHS acute risk)
+    """
+    val = values.glucose_value
+    mgdl = val * 18.018 if values.unit == "mmol/L" else val
+
+    if mgdl < 54.0:
+        return "Severe Hypoglycemia"
+    elif mgdl < 70.0:
+        return "Hypoglycemia Alert"
+    elif mgdl >= 300.0:
+        return "Hyperglycemic Crisis"
+    elif mgdl >= 200.0:
+        return "Hyperglycemia"
+    elif values.meal_context in ("post_meal", "after_meal"):
+        return "Normal" if mgdl < 140.0 else "Elevated"
+    elif values.meal_context in ("fasting", "before_meal"):
+        return "Normal" if mgdl <= 99.0 else "Elevated"
+    else:
+        # General / Random / Bedtime reading
+        return "Normal" if mgdl <= 140.0 else "Elevated"
+
+
+def evaluate_glucose_alerts(
+    values: BloodGlucoseValues, 
+    issues: List[ExtractedIssue]
+) -> Tuple[str, bool, List[str]]:
+    """
+    Evaluates glucose clinical stage, red-flag symptoms, and actionable guidance.
+    Returns: (clinical_stage, has_red_flags, safety_alerts)
+    """
+    stage = classify_blood_glucose(values)
+    alerts: List[str] = []
+    has_red_flags = any(issue.is_red_flag for issue in issues)
+
+    # Hypoglycemia guidance (Rule of 15)
+    if stage == "Severe Hypoglycemia":
+        has_red_flags = True
+        alerts.append(
+            "CRITICAL EMERGENCY: Blood glucose is dangerously low (<54 mg/dL / <3.0 mmol/L). "
+            "Consume 15-20g of fast-acting carbohydrates immediately (juice, soda, glucose tablets). "
+            "If the person is confused, uncooperative, or unconscious, administer glucagon and call emergency services (911) immediately. Do not put food into an unconscious person's mouth."
+        )
+    elif stage == "Hypoglycemia Alert":
+        alerts.append(
+            "Hypoglycemia Alert: Reading is below 70 mg/dL (3.9 mmol/L). Follow the Rule of 15: "
+            "consume 15 grams of fast-acting carbohydrates (4 oz fruit juice, 3-4 glucose tablets, or 1 tablespoon sugar), "
+            "rest quietly, and recheck your blood sugar in 15 minutes."
+        )
+
+    # Hyperglycemic Emergency guidance
+    if stage == "Hyperglycemic Crisis":
+        has_red_flags = True
+        alerts.append(
+            "CRITICAL ALERT: Blood glucose is severely elevated (>=300 mg/dL / >=16.7 mmol/L). "
+            "Check for urine/blood ketones immediately if you have Type 1 Diabetes. "
+            "Drink plenty of water and contact your physician or seek urgent medical evaluation."
+        )
+    elif stage == "Hyperglycemia":
+        alerts.append(
+            "Hyperglycemia Alert: Blood sugar is elevated (>=200 mg/dL). Drink water, verify whether medications were taken, and consult your diabetes care plan."
+        )
+
+    return stage, has_red_flags, alerts
+

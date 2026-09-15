@@ -1,4 +1,4 @@
-from typing import Optional, Literal
+from typing import Optional, Literal, Union, Dict, Any, List
 from pydantic import BaseModel, Field, model_validator
 from datetime import datetime
 
@@ -87,6 +87,24 @@ class ExtractedIssue(BaseModel):
     is_red_flag: bool = Field(False, description="True if symptom represents an acute hypertensive crisis emergency warning")
     severity: Optional[Literal["mild", "moderate", "severe"]] = None
 
+GlucoseUnit = Literal["mg/dL", "mmol/L"]
+MealContext = Literal["fasting", "before_meal", "after_meal", "post_meal", "bedtime", "random"]
+
+class BloodGlucoseValues(BaseModel):
+    glucose_value: float = Field(..., description="Measured glucose concentration")
+    unit: GlucoseUnit = Field(default="mg/dL", description="Measurement unit ('mg/dL' or 'mmol/L')")
+    meal_context: Optional[MealContext] = Field(default=None, description="Meal timing context e.g. fasting, after_meal")
+
+    @model_validator(mode="after")
+    def validate_bounds(self):
+        if self.unit == "mg/dL":
+            if not (10.0 <= self.glucose_value <= 700.0):
+                raise ValueError(f"Glucose value {self.glucose_value} mg/dL is outside valid physiological bounds (10 - 700 mg/dL).")
+        elif self.unit == "mmol/L":
+            if not (0.5 <= self.glucose_value <= 40.0):
+                raise ValueError(f"Glucose value {self.glucose_value} mmol/L is outside valid physiological bounds (0.5 - 40.0 mmol/L).")
+        return self
+
 class ImageQualityReport(BaseModel):
     is_readable: bool = True
     glare_detected: bool = False
@@ -95,9 +113,9 @@ class ImageQualityReport(BaseModel):
 
 class ScanExtractionResponse(BaseModel):
     scan_id: str
-    detected_type: Literal["blood_pressure"] = "blood_pressure"
-    device_name: Optional[str] = Field(None, description="e.g. Omron HEM-7120, Beurer BM 28")
-    values: BloodPressureValues
+    detected_type: Literal["blood_pressure", "blood_glucose", "unknown"] = "blood_pressure"
+    device_name: Optional[str] = Field(None, description="e.g. Omron HEM-7120, Accu-Chek Guide")
+    values: Union[BloodPressureValues, BloodGlucoseValues, Dict[str, Any]]
     confidence: float = Field(..., ge=0.0, le=1.0)
     quality: ImageQualityReport
     raw_detected_text: Optional[str] = None
@@ -135,4 +153,33 @@ class BloodPressureMeasurementResponse(BaseModel):
     device_model: Optional[str] = None
     created_at: str
     updated_at: str
+
+class BloodGlucoseMeasurementCreate(BaseModel):
+    recorded_at: Optional[str] = Field(None, description="ISO 8601 timestamp of measurement")
+    values: BloodGlucoseValues
+    meal_context: Optional[MealContext] = Field(None, description="fasting, before_meal, after_meal, bedtime, random")
+    raw_user_notes: Optional[str] = Field(None, description="Unfiltered user notes/sentences")
+    issues: list[ExtractedIssue] = Field(default_factory=list, description="Extracted or user-confirmed clinical issues")
+    source: Literal["camera", "screenshot", "manual"] = "camera"
+    scan_id: Optional[str] = None
+    device_model: Optional[str] = None
+
+class BloodGlucoseMeasurementResponse(BaseModel):
+    id: str
+    user_id: str
+    recorded_at: str
+    values: BloodGlucoseValues
+    meal_context: Optional[MealContext] = None
+    units: dict[str, str] = Field(default_factory=lambda: {"glucose": "mg/dL"})
+    clinical_stage: str # "Severe Hypoglycemia", "Hypoglycemia Alert", "Normal", "Elevated", "Hyperglycemia", "Hyperglycemic Crisis"
+    has_red_flags: bool = False
+    safety_alerts: list[str] = Field(default_factory=list)
+    raw_user_notes: Optional[str] = None
+    issues: list[ExtractedIssue] = Field(default_factory=list)
+    source: str
+    scan_id: Optional[str] = None
+    device_model: Optional[str] = None
+    created_at: str
+    updated_at: str
+
 

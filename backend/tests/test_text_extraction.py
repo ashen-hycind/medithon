@@ -1,6 +1,7 @@
 import sys
 import os
 import unittest
+from unittest.mock import patch
 
 # Add backend directory to sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -76,7 +77,8 @@ class TestTextExtractionAndClinicalRules(unittest.TestCase):
         self.assertFalse(has_red_flags)
         self.assertTrue(any("temporarily raise blood pressure" in a for a in alerts))
 
-    def test_text_extraction_caffeine_and_sleep_no_med_assumption(self):
+    @patch("services.gemini_service.get_gemini_client", return_value=None)
+    def test_text_extraction_caffeine_and_sleep_no_med_assumption(self, _mock_client):
         text = "Drank a double espresso and had poor sleep, not on any medications."
         issues = extract_issues_from_text(text)
         tags = [i.tag for i in issues]
@@ -87,7 +89,8 @@ class TestTextExtractionAndClinicalRules(unittest.TestCase):
         self.assertNotIn("bp_med_missed", tags)
         self.assertNotIn("bp_med_taken", tags)
 
-    def test_text_extraction_dizziness_headache_and_otc_painkiller(self):
+    @patch("services.gemini_service.get_gemini_client", return_value=None)
+    def test_text_extraction_dizziness_headache_and_otc_painkiller(self, _mock_client):
         text = "Felt dizzy and took an Advil for my headache"
         issues = extract_issues_from_text(text)
         tags = [i.tag for i in issues]
@@ -96,7 +99,8 @@ class TestTextExtractionAndClinicalRules(unittest.TestCase):
         self.assertIn("headache", tags)
         self.assertIn("otc_nsaid", tags)
 
-    def test_text_extraction_acute_red_flags(self):
+    @patch("services.gemini_service.get_gemini_client", return_value=None)
+    def test_text_extraction_acute_red_flags(self, _mock_client):
         text = "I'm having tightness in my chest and shortness of breath"
         issues = extract_issues_from_text(text)
         
@@ -105,7 +109,8 @@ class TestTextExtractionAndClinicalRules(unittest.TestCase):
         tags = [i.tag for i in issues]
         self.assertTrue("chest_pain" in tags or "shortness_of_breath" in tags)
 
-    def test_text_extraction_normal_no_issues(self):
+    @patch("services.gemini_service.get_gemini_client", return_value=None)
+    def test_text_extraction_normal_no_issues(self, _mock_client):
         text = "Everything was normal, felt fine"
         issues = extract_issues_from_text(text)
         self.assertEqual(len(issues), 0)
