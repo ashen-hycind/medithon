@@ -219,12 +219,22 @@ class AnalysisStats(BaseModel):
     fasting_avg_glucose: Optional[float] = None
     post_meal_avg_glucose: Optional[float] = None
 
+class RoteMemoryState(BaseModel):
+    session_resumed: bool = False
+    last_checkpoint_at: Optional[str] = None
+    delta_readings_count: int = 0
+    prior_baseline_systolic: Optional[float] = None
+    prior_baseline_glucose: Optional[float] = None
+    prior_trajectory_trend: Optional[str] = None
+    trajectory_shift_summary: Optional[str] = None
+
 class HealthAnalysisResponse(BaseModel):
     user_id: str
     generated_at: str
     is_cached: bool = False
     stats: AnalysisStats
     patterns: Optional[dict[str, Any]] = None
+    rote_memory: Optional[RoteMemoryState] = None
     correlations: list[CorrelationItem] = Field(default_factory=list)
     urgent_alerts: list[str] = Field(default_factory=list)
     doctor_summary: str

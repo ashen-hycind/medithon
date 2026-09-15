@@ -456,6 +456,109 @@ class TestExactPatternDetection(unittest.TestCase):
         self.assertIn("metabolic_cardiovascular", categories)
 
 
+class TestRoteMemoryIntegration(unittest.TestCase):
+    def test_heuristic_correlations_resumes_from_rote_memory(self):
+        stats = {
+            "total_bp_readings": 4,
+            "total_glucose_readings": 0,
+            "avg_systolic": 142.0,
+            "avg_diastolic": 88.0,
+            "avg_pulse": 76.0,
+            "avg_glucose_mg_dl": None,
+            "confounder_effects": {},
+            "paired_readings": [],
+            "urgent_events": [],
+            "weight_shifts": [],
+            "patterns": {},
+            "rote_memory": {
+                "session_resumed": True,
+                "last_checkpoint_at": "2026-09-15T12:00:00+00:00",
+                "delta_readings_count": 2,
+                "prior_baseline_systolic": 134.0,
+                "prior_baseline_glucose": None,
+                "prior_trajectory_trend": "rising",
+                "trajectory_shift_summary": "Integrated 2 new reading(s). Baseline systolic shifted from 134.0 to 142.0 mmHg (+8.0 mmHg shift)."
+            }
+        }
+        res = generate_heuristic_correlations(user_id="rote_test_user", stats=stats)
+        
+        # Verify rote memory is propagated
+        self.assertIsNotNone(res.rote_memory)
+        self.assertTrue(res.rote_memory.session_resumed)
+        self.assertEqual(res.rote_memory.delta_readings_count, 2)
+        self.assertEqual(res.rote_memory.prior_baseline_systolic, 134.0)
+
+        # Verify a specific longitudinal progression correlation item was generated
+        headlines = [c.headline for c in res.correlations]
+        self.assertIn("Session Resumed: Longitudinal Progression", headlines)
+        resumed_item = next(c for c in res.correlations if c.headline == "Session Resumed: Longitudinal Progression")
+        self.assertIn("Continuing from previous checkpoint", resumed_item.explanation)
+        self.assertIn("+8.0 mmHg shift", resumed_item.explanation)
+
+    def test_get_or_compute_analysis_with_prior_checkpoint_delta(self):
+        user_id = "user_rote_checkpoint"
+        mock_db = MagicMock()
+        mock_profile_doc = MagicMock()
+        mock_db.collection.return_value.document.return_value = mock_profile_doc
+
+        # Prior checkpoint doc
+        mock_analysis_doc = MagicMock()
+        mock_analysis_doc.exists = True
+        mock_analysis_doc.to_dict.return_value = {
+            "user_id": user_id,
+            "generated_at": "2026-09-15T10:00:00+00:00",
+            "is_cached": False,
+            "stats": {
+                "total_bp_readings": 2,
+                "total_glucose_readings": 0,
+                "avg_systolic": 130.0,
+                "avg_diastolic": 82.0
+            },
+            "patterns": {
+                "bp_trend": {"trend_label": "stable"}
+            },
+            "correlations": [],
+            "urgent_alerts": [],
+            "doctor_summary": "Prior evaluation summary."
+        }
+
+        # Measurement stream has 1 new measurement after generated_at
+        mock_new_bp = MagicMock()
+        mock_new_bp.to_dict.return_value = {
+            "id": "bp_new",
+            "created_at": "2026-09-16T08:00:00+00:00",
+            "recorded_at": "2026-09-16T08:00:00+00:00",
+            "measurement_type": "blood_pressure",
+            "values": {"systolic": 144, "diastolic": 90, "pulse": 80}
+        }
+
+        def get_subcollection(name):
+            coll = MagicMock()
+            if name == "analysis":
+                coll.document.return_value.get.return_value = mock_analysis_doc
+                return coll
+            elif name == "measurements":
+                coll.limit.return_value.stream.return_value = [mock_new_bp]
+                # when querying newer_docs:
+                coll.where.return_value.limit.return_value.stream.return_value = [mock_new_bp]
+                return coll
+            elif name == "weight_history":
+                coll.limit.return_value.stream.return_value = []
+                return coll
+            return coll
+
+        mock_profile_doc.collection.side_effect = get_subcollection
+
+        with patch("services.analysis_service.get_gemini_client", return_value=None):
+            res = get_or_compute_analysis(user_id=user_id, db=mock_db, force_refresh=False)
+            self.assertFalse(res.is_cached)
+            self.assertIsNotNone(res.rote_memory)
+            self.assertTrue(res.rote_memory.session_resumed)
+            self.assertEqual(res.rote_memory.delta_readings_count, 1)
+            self.assertEqual(res.rote_memory.prior_baseline_systolic, 130.0)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 

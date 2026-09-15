@@ -24,6 +24,7 @@ load_dotenv()
 from schemas import (
     CorrelationItem,
     AnalysisStats,
+    RoteMemoryState,
     HealthAnalysisResponse
 )
 
@@ -882,11 +883,28 @@ def generate_heuristic_correlations(
                     clinical_suggestion=f"Monitor biometric responses carefully when experiencing {tag_label.lower()}."
                 ))
 
+    # 7. Rote Memory Incremental Continuation
+    rote_mem = stats.get("rote_memory")
+    if rote_mem and rote_mem.get("session_resumed"):
+        shift_txt = rote_mem.get("trajectory_shift_summary") or f"{rote_mem.get('delta_readings_count')} new reading(s) integrated since previous session."
+        correlations.insert(0, CorrelationItem(
+            category="longitudinal_trend",
+            confidence="high",
+            headline="Session Resumed: Longitudinal Progression",
+            explanation=f"Continuing from previous checkpoint ({rote_mem.get('last_checkpoint_at')}). {shift_txt}",
+            evidence_count=int(rote_mem.get("delta_readings_count", 1)),
+            clinical_suggestion="Continue regular logging to maintain longitudinal pattern tracking across sessions."
+        ))
+
     # Construct synthesized clinical summary
     doc_summary_lines = []
+    if rote_mem and rote_mem.get("session_resumed"):
+        doc_summary_lines.append(
+            f"[Resumed Session] Continuing from previous evaluation on {rote_mem.get('last_checkpoint_at')}. {rote_mem.get('trajectory_shift_summary', '')}"
+        )
     if stats.get("total_bp_readings"):
         doc_summary_lines.append(
-            f"Over {stats['total_bp_readings']} recorded blood pressure measurements, patient demonstrates an average reading of {stats.get('avg_systolic', 'N/A')}/{stats.get('avg_diastolic', 'N/A')} mmHg."
+            f"Over {stats['total_bp_readings']} total blood pressure measurements, patient demonstrates an average reading of {stats.get('avg_systolic', 'N/A')}/{stats.get('avg_diastolic', 'N/A')} mmHg."
         )
     if stats.get("total_glucose_readings"):
         doc_summary_lines.append(
@@ -918,6 +936,7 @@ def generate_heuristic_correlations(
             post_meal_avg_glucose=stats.get("post_meal_avg_glucose")
         ),
         patterns=stats.get("patterns"),
+        rote_memory=RoteMemoryState(**rote_mem) if rote_mem else None,
         correlations=correlations,
         urgent_alerts=urgent_alerts,
         doctor_summary=doctor_summary
@@ -1156,6 +1175,17 @@ def _build_temporal_content(stats: Dict[str, Any]) -> str:
                     f"Avg SYS when present: {sc['avg_systolic_when_present']} mmHg"
                 )
 
+    # Rote Memory (Pick up from where left off)
+    rote_mem = stats.get("rote_memory")
+    if rote_mem and rote_mem.get("session_resumed"):
+        sections.append("\n=== RESUMED SESSION (CONTINUING FROM PRIOR EVALUATION) ===")
+        sections.append(f"  Prior Checkpoint Timestamp: {rote_mem.get('last_checkpoint_at')}")
+        sections.append(f"  Prior Baseline: Systolic={rote_mem.get('prior_baseline_systolic')} mmHg, Glucose={rote_mem.get('prior_baseline_glucose')} mg/dL")
+        sections.append(f"  Prior Trajectory Trend: {rote_mem.get('prior_trajectory_trend')}")
+        sections.append(f"  Delta Readings Integrated: {rote_mem.get('delta_readings_count')}")
+        sections.append(f"  Longitudinal Shift: {rote_mem.get('trajectory_shift_summary')}")
+        sections.append("  ROTE INSTRUCTION: Do NOT start from scratch. Build upon the prior findings and describe the trajectory progression.")
+
     sections.append(
         "\n=== INSTRUCTIONS ===\n"
         "Apply your 4-step Temporal Chain-of-Thought methodology to the statistics above.\n"
@@ -1235,6 +1265,7 @@ def generate_correlation_insights(
             m_bp = stats.get("morning_avg_bp")
             e_bp = stats.get("evening_avg_bp")
 
+            rote_mem = stats.get("rote_memory")
             return HealthAnalysisResponse(
                 user_id=user_id,
                 generated_at=now_iso,
@@ -1252,6 +1283,7 @@ def generate_correlation_insights(
                     post_meal_avg_glucose=stats.get("post_meal_avg_glucose")
                 ),
                 patterns=stats.get("patterns"),
+                rote_memory=RoteMemoryState(**rote_mem) if rote_mem else None,
                 correlations=correlations,
                 urgent_alerts=urgent_alerts,
                 doctor_summary=doctor_summary
@@ -1291,28 +1323,31 @@ def get_or_compute_analysis(
         except Exception as e:
             print(f"[AnalysisService] Firestore doc ref error: {e}")
 
-    # 1. Check cache validity
-    if not force_refresh and analysis_ref is not None:
+    # 1. Check cache validity & retrieve prior rote checkpoint
+    prior_checkpoint_data = None
+    if analysis_ref is not None:
         try:
             cached_doc = analysis_ref.get()
-            if cached_doc.exists:
-                data = cached_doc.to_dict()
-                gen_at = _parse_iso_datetime(data.get("generated_at"))
-                if gen_at and (now - gen_at).total_seconds() < 3600:
-                    # Check if any measurement was created after generated_at
-                    measurements_ref = db.collection("profiles").document(user_id).collection("measurements")
-                    newer_docs = (
-                        measurements_ref
-                        .where("created_at", ">", data.get("generated_at"))
-                        .limit(1)
-                        .stream()
-                    )
-                    has_newer = any(True for _ in newer_docs)
-                    if not has_newer:
-                        # Return cached
-                        resp = HealthAnalysisResponse(**data)
-                        resp.is_cached = True
-                        return resp
+            if getattr(cached_doc, "exists", False) is True:
+                doc_dict = cached_doc.to_dict()
+                if isinstance(doc_dict, dict) and isinstance(doc_dict.get("generated_at"), str):
+                    prior_checkpoint_data = doc_dict
+                    gen_at = _parse_iso_datetime(prior_checkpoint_data.get("generated_at"))
+                    if not force_refresh and gen_at and (now - gen_at).total_seconds() < 3600:
+                        # Check if any measurement was created after generated_at
+                        measurements_ref = db.collection("profiles").document(user_id).collection("measurements")
+                        newer_docs = (
+                            measurements_ref
+                            .where("created_at", ">", prior_checkpoint_data.get("generated_at"))
+                            .limit(1)
+                            .stream()
+                        )
+                        has_newer = any(True for _ in newer_docs)
+                        if not has_newer:
+                            # Repetitive query with no new data: return cached directly without recomputation
+                            resp = HealthAnalysisResponse(**prior_checkpoint_data)
+                            resp.is_cached = True
+                            return resp
         except Exception as cache_err:
             print(f"[AnalysisService] Cache read notice: {cache_err}. Computing fresh analysis.")
 
@@ -1340,11 +1375,58 @@ def get_or_compute_analysis(
         except Exception as fetch_err:
             print(f"[AnalysisService] Error reading user measurements: {fetch_err}")
 
-    # 3. Pre-aggregate and generate
+    # 3. Pre-aggregate and calculate incremental rote memory deltas
     stats = preaggregate_health_data(bp_records, glucose_records, weight_records)
+
+    # Rote State Resumption: Pick up from where left off
+    if prior_checkpoint_data and isinstance(prior_checkpoint_data, dict):
+        prior_stats = prior_checkpoint_data.get("stats", {}) if isinstance(prior_checkpoint_data.get("stats"), dict) else {}
+        prior_patterns = prior_checkpoint_data.get("patterns", {}) if isinstance(prior_checkpoint_data.get("patterns"), dict) else {}
+        prior_gen_at = str(prior_checkpoint_data.get("generated_at", "")) if prior_checkpoint_data.get("generated_at") else None
+        
+        prior_sys = prior_stats.get("avg_systolic") if isinstance(prior_stats.get("avg_systolic"), (int, float)) else None
+        prior_glu = prior_stats.get("avg_glucose_mg_dl") if isinstance(prior_stats.get("avg_glucose_mg_dl"), (int, float)) else None
+        bp_t = prior_patterns.get("bp_trend", {}) if isinstance(prior_patterns.get("bp_trend"), dict) else {}
+        prior_trend = str(bp_t.get("trend_label", "")) if bp_t.get("trend_label") else None
+
+        # Count delta measurements recorded strictly after prior checkpoint
+        delta_bp = sum(1 for r in bp_records if str(r.get("created_at") or r.get("recorded_at", "")) > (prior_gen_at or ""))
+        delta_glu = sum(1 for g in glucose_records if str(g.get("created_at") or g.get("recorded_at", "")) > (prior_gen_at or ""))
+        delta_count = delta_bp + delta_glu
+
+        current_sys = stats.get("avg_systolic")
+        if current_sys is not None and prior_sys is not None and delta_count > 0:
+            diff_sys = round(current_sys - prior_sys, 1)
+            dir_text = f"+{diff_sys} mmHg shift" if diff_sys > 0 else f"{diff_sys} mmHg shift" if diff_sys < 0 else "unchanged"
+            shift_summary = f"Integrated {delta_count} new reading(s). Baseline systolic shifted from {prior_sys} to {current_sys} mmHg ({dir_text})."
+        elif delta_count > 0:
+            shift_summary = f"Integrated {delta_count} new reading(s) onto prior baseline."
+        else:
+            shift_summary = "Re-evaluating longitudinal baseline with existing data."
+
+        stats["rote_memory"] = {
+            "session_resumed": True,
+            "last_checkpoint_at": prior_gen_at,
+            "delta_readings_count": delta_count,
+            "prior_baseline_systolic": prior_sys,
+            "prior_baseline_glucose": prior_glu,
+            "prior_trajectory_trend": prior_trend,
+            "trajectory_shift_summary": shift_summary
+        }
+    else:
+        stats["rote_memory"] = {
+            "session_resumed": False,
+            "last_checkpoint_at": None,
+            "delta_readings_count": stats.get("total_bp_readings", 0) + stats.get("total_glucose_readings", 0),
+            "prior_baseline_systolic": None,
+            "prior_baseline_glucose": None,
+            "prior_trajectory_trend": None,
+            "trajectory_shift_summary": "Initial baseline established."
+        }
+
     analysis = generate_correlation_insights(user_id, stats)
 
-    # 4. Save to cache
+    # 4. Save to cache as new rote checkpoint
     if db is not None and analysis_ref is not None:
         try:
             analysis_dict = analysis.model_dump()
