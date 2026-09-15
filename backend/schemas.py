@@ -183,3 +183,50 @@ class BloodGlucoseMeasurementResponse(BaseModel):
     updated_at: str
 
 
+# =====================================================================
+# AI Clinical Correlation Schemas
+# =====================================================================
+
+CorrelationCategory = Literal[
+    "lifestyle_trigger",
+    "metabolic_cardiovascular",
+    "symptom_spike",
+    "longitudinal_trend",
+    "medication_response",
+    "fluid_weight_shift",
+    "other"
+]
+
+CorrelationConfidence = Literal["high", "moderate", "low"]
+
+class CorrelationItem(BaseModel):
+    category: CorrelationCategory = Field(..., description="Categorization of correlation pattern")
+    confidence: CorrelationConfidence = Field(..., description="Confidence level: high, moderate, low")
+    headline: str = Field(..., min_length=1, description="Concise clinical title")
+    explanation: str = Field(..., min_length=1, description="Detailed explanation grounded in factual evidence")
+    evidence_count: int = Field(default=1, ge=0, description="Number of supporting measurement occurrences")
+    clinical_suggestion: str = Field(..., min_length=1, description="Actionable, non-diagnostic guidance")
+
+class AnalysisStats(BaseModel):
+    total_bp_readings: int = Field(default=0, ge=0)
+    total_glucose_readings: int = Field(default=0, ge=0)
+    avg_systolic: Optional[float] = None
+    avg_diastolic: Optional[float] = None
+    avg_pulse: Optional[float] = None
+    avg_glucose_mg_dl: Optional[float] = None
+    morning_avg_bp: Optional[dict[str, float]] = None
+    evening_avg_bp: Optional[dict[str, float]] = None
+    fasting_avg_glucose: Optional[float] = None
+    post_meal_avg_glucose: Optional[float] = None
+
+class HealthAnalysisResponse(BaseModel):
+    user_id: str
+    generated_at: str
+    is_cached: bool = False
+    stats: AnalysisStats
+    correlations: list[CorrelationItem] = Field(default_factory=list)
+    urgent_alerts: list[str] = Field(default_factory=list)
+    doctor_summary: str
+
+
+
