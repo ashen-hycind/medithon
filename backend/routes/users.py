@@ -141,3 +141,47 @@ async def update_weight(weight_data: WeightUpdate, current_user: dict = Depends(
     })
 
     return {"status": "success", "weight_kg": weight_data.weight_kg, "recorded_at": timestamp}
+
+@router.get("/weight/history", status_code=status.HTTP_200_OK)
+async def get_weight_history(limit: int = 50, current_user: dict = Depends(get_current_user)):
+    db = get_firestore_db()
+    if db is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Firestore database is not connected.")
+
+    uid = current_user["uid"]
+    doc_ref = db.collection("profiles").document(uid)
+    history_ref = doc_ref.collection("weight_history")
+    
+    results = []
+    try:
+        docs = history_ref.order_by("recorded_at", direction="DESCENDING").limit(limit).stream()
+        for doc in docs:
+            item = doc.to_dict()
+            item["id"] = doc.id
+            results.append(item)
+    except Exception:
+        # Fallback if composite index is pending
+        try:
+            docs = history_ref.limit(limit).stream()
+            for doc in docs:
+                item = doc.to_dict()
+                item["id"] = doc.id
+                results.append(item)
+            results.sort(key=lambda x: x.get("recorded_at", ""), reverse=True)
+        except Exception:
+            results = []
+
+    # If history is empty, check profile for baseline weight
+    if not results:
+        profile_doc = doc_ref.get()
+        if profile_doc.exists:
+            p_data = profile_doc.to_dict()
+            if p_data.get("weight_kg"):
+                results.append({
+                    "id": "baseline_weight",
+                    "weight_kg": p_data["weight_kg"],
+                    "recorded_at": p_data.get("updated_at") or p_data.get("created_at") or datetime.now(timezone.utc).isoformat(),
+                    "source": "initial_profile"
+                })
+
+    return results

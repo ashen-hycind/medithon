@@ -100,6 +100,12 @@ export interface BloodPressureMeasurement {
   updated_at: string;
 }
 
+export interface WeightRecord {
+  id?: string;
+  weight_kg: number;
+  recorded_at: string;
+  source?: string;
+}
 export interface BloodGlucoseMeasurementCreate {
   recorded_at?: string;
   values: BloodGlucoseValues;
