@@ -4,7 +4,22 @@ Welcome, Udayan! 👋
 
 This document defines your workspace, the exact data contract the backend expects, and how your Gemini Multimodal Vision service connects to the rest of the platform.
 
+### 🌿 Git Branching Workflow
+Please create a separate feature branch before writing code so `main` stays protected:
+```bash
+# 1. Pull the latest scaffold from main
+git checkout main
+git pull origin main
+
+# 2. Create and switch to your feature branch
+git checkout -b feat/vision-detection
+
+# 3. When you're ready, push your branch and create a PR
+git push -u origin feat/vision-detection
+```
+
 ---
+
 
 ## 1. Your File & Responsibility
 
