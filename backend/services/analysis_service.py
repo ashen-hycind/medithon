@@ -454,39 +454,183 @@ def generate_heuristic_correlations(
 
 
 # =====================================================================
-# 3. Gemini Multimodal / Structured LLM Correlation Reasoning
+# 3. Gemini Temporal Chain-of-Thought Reasoning
+#    Based on: Kruse et al. (2025) "LLMs with Temporal Reasoning for
+#    Longitudinal Clinical Summarization and Prediction"
+#    EMNLP 2025 Findings — PMID: 41399802 / PMC12702291
 # =====================================================================
 
+# --- Step 1: Temporal Ordering Prompt ---
+# The paper demonstrates that explicitly structuring data chronologically
+# and requiring step-by-step temporal progression reasoning (CoT) yields
+# significantly better clinical correlation quality over single-pass prompting.
 ANALYSIS_SYSTEM_PROMPT = """
 You are an expert clinical data analyst and chronic disease specialist.
-You are provided with a patient's deterministic health timeline statistics (Blood Pressure, Blood Glucose, Weight, and Symptoms/Context).
+You use evidence-based temporal reasoning techniques to analyze longitudinal patient health data.
 
-Objectives:
-1. Identify correlations between symptoms/testing conditions (caffeine, sleep, NSAIDs, exercise) and blood pressure spikes.
-2. Identify correlations between blood glucose levels and cardiovascular metrics (metabolic-vascular interactions).
-3. Identify longitudinal trends over time (e.g. morning vs evening variation).
+=== METHODOLOGY (Temporal Chain-of-Thought Reasoning) ===
+This approach is grounded in research showing that LLMs perform significantly better
+at clinical reasoning when they explicitly reason step-by-step over chronological
+health trajectories rather than processing raw data in a single pass.
 
-CLINICAL SAFETY RULES:
-- NEVER state an unauthorized definitive diagnosis (e.g., do NOT say "You have Type 2 Diabetes" or "You have Kidney Failure").
-- Use objective, grounded, non-alarmist language: "Data indicates...", "Readings show a correlation between...", "Consider discussing with your clinician...".
-- Flag any acute danger signs (hypertensive crisis symptoms, severe hypoglycemia) in urgent_alerts.
+You will receive pre-computed health statistics and timeline data. Reason in 4 explicit steps:
 
-Return strictly JSON matching this structure:
+STEP 1 — TEMPORAL TRAJECTORY SCAN:
+  Read the chronological ordering of events. Identify:
+  - How values CHANGED over time (worsening, improving, oscillating, stable).
+  - Time-clustered patterns (e.g., morning surge, post-meal spikes, nighttime dips).
+  - Temporal co-occurrences (e.g., "on days when X was logged, Y was elevated the same or next day").
+
+STEP 2 — CONFOUNDER & TRIGGER IDENTIFICATION:
+  For each lifestyle/context tag (caffeine, NSAIDs, poor sleep, high stress, exercise):
+  - Calculate: average biometric VALUE with tag vs. average WITHOUT tag.
+  - The statistics are pre-computed and provided to you. Ground every claim in those numbers.
+  - NEVER invent or estimate data not present in the provided statistics.
+
+STEP 3 — CROSS-STREAM TEMPORAL PAIRING:
+  For blood pressure and blood glucose readings taken within ±2 hours of each other:
+  - Identify if glucose elevation preceded, co-occurred with, or followed cardiovascular load.
+  - Note the directionality of the effect (e.g., "glucose rose BEFORE pulse elevation").
+  - Characterize: was this a post-prandial spike? A fasting anomaly? A morning cortisol effect?
+
+STEP 4 — LONGITUDINAL TREND SYNTHESIS:
+  After completing steps 1-3, synthesize:
+  - Is the patient's overall trajectory IMPROVING, STABLE, or DETERIORATING?
+  - Are morning vs evening readings consistently different? (Diurnal pattern)
+  - Are there acute crisis events? Do they cluster around specific lifestyle factors?
+  - Construct a physician-grade, multi-paragraph synthesized summary.
+
+=== CLINICAL SAFETY CONSTRAINTS ===
+- NEVER state a definitive clinical diagnosis ("You have Type 2 Diabetes", "This is renal failure").
+- Use objective, grounded language anchored to the provided statistics:
+    "Data indicates...", "Readings show a correlation...", "Discuss with your clinician..."
+- Do NOT hallucinate numbers. Every value cited must match the provided statistics.
+- Flag acute danger events (Hypertensive Crisis ≥180/120, Severe Hypoglycemia <54 mg/dL) in urgent_alerts.
+
+=== OUTPUT FORMAT ===
+Return strictly valid JSON (no markdown fences, no explanation outside JSON):
 {
+  "temporal_reasoning_trace": "Brief description of key temporal patterns observed in Step 1-3 before final output (1-2 sentences)",
   "correlations": [
     {
-      "category": "lifestyle_trigger",
-      "confidence": "high",
-      "headline": "Short title",
-      "explanation": "Clear explanation of the correlation with specific data points",
-      "evidence_count": 4,
-      "clinical_suggestion": "Actionable non-diagnostic guidance"
+      "category": "lifestyle_trigger" | "metabolic_cardiovascular" | "symptom_spike" | "longitudinal_trend" | "medication_response" | "fluid_weight_shift" | "other",
+      "confidence": "high" | "moderate" | "low",
+      "headline": "Concise clinical title",
+      "explanation": "Specific data-anchored explanation citing exact numbers from the provided statistics",
+      "evidence_count": <integer number of supporting measurement events>,
+      "temporal_direction": "before" | "concurrent" | "after" | "bidirectional" | "not_applicable",
+      "clinical_suggestion": "Actionable, non-diagnostic guidance for the patient"
     }
   ],
-  "urgent_alerts": ["string"],
-  "doctor_summary": "1-2 paragraphs synthesized clinical summary for their doctor"
+  "urgent_alerts": ["alert string"],
+  "doctor_summary": "Physician-grade 2-3 paragraph summary covering: (1) temporal trajectory, (2) key correlations with specific values, (3) recommendations for clinical follow-up"
 }
 """
+
+
+def _build_temporal_content(stats: Dict[str, Any]) -> str:
+    """
+    Constructs a chronologically-ordered, grounded data payload for the Gemini prompt.
+    Implements the paper's recommendation of structuring longitudinal data with
+    explicit temporal markers before reasoning, mirroring RAG-style grounding.
+    """
+    sections = []
+
+    sections.append("=== PATIENT HEALTH TIMELINE STATISTICS ===")
+    sections.append(f"Total Blood Pressure Recordings: {stats.get('total_bp_readings', 0)}")
+    sections.append(f"Total Blood Glucose Recordings: {stats.get('total_glucose_readings', 0)}")
+
+    # Aggregate baselines
+    if stats.get("avg_systolic") is not None:
+        sections.append(
+            f"\n--- BLOOD PRESSURE AVERAGES ---\n"
+            f"Overall Average: {stats['avg_systolic']}/{stats.get('avg_diastolic')} mmHg "
+            f"(Pulse: {stats.get('avg_pulse', 'N/A')} bpm)"
+        )
+    m_bp = stats.get("morning_avg_bp")
+    e_bp = stats.get("evening_avg_bp")
+    if m_bp:
+        sections.append(f"Morning Average (05:00-11:59): {m_bp['systolic']}/{m_bp['diastolic']} mmHg (n={m_bp.get('count', '?')})")
+    if e_bp:
+        sections.append(f"Evening Average (17:00-23:59): {e_bp['systolic']}/{e_bp['diastolic']} mmHg (n={e_bp.get('count', '?')})")
+    if m_bp and e_bp:
+        delta = round(m_bp["systolic"] - e_bp["systolic"], 1)
+        direction = "higher in morning" if delta > 0 else "higher in evening" if delta < 0 else "equal"
+        sections.append(f"Diurnal Δ Systolic: {abs(delta)} mmHg {direction}")
+
+    # Glucose baselines
+    if stats.get("avg_glucose_mg_dl") is not None:
+        sections.append(
+            f"\n--- BLOOD GLUCOSE AVERAGES ---\n"
+            f"Overall Average: {stats['avg_glucose_mg_dl']} mg/dL"
+        )
+    if stats.get("fasting_avg_glucose"):
+        sections.append(f"Fasting Average: {stats['fasting_avg_glucose']} mg/dL")
+    if stats.get("post_meal_avg_glucose"):
+        sections.append(f"Post-Meal Average: {stats['post_meal_avg_glucose']} mg/dL")
+    if stats.get("fasting_avg_glucose") and stats.get("post_meal_avg_glucose"):
+        delta_glu = round(stats["post_meal_avg_glucose"] - stats["fasting_avg_glucose"], 1)
+        sections.append(f"Post-Prandial Δ Glucose: +{delta_glu} mg/dL above fasting baseline")
+
+    # Confounder effects — this is the primary grounding data
+    confounders = stats.get("confounder_effects", {})
+    if confounders:
+        sections.append("\n--- CONFOUNDER / LIFESTYLE TRIGGER EFFECTS (Pre-computed) ---")
+        for tag, c in confounders.items():
+            tag_label = tag.replace("_", " ").title()
+            sections.append(
+                f"  [{tag_label}]: {c['count']} occurrences | "
+                f"Avg SYS with tag: {c['avg_systolic_with_tag']} mmHg | "
+                f"Baseline SYS: {c['baseline_systolic']} mmHg | "
+                f"Δ SYS: {'+' if c['delta_systolic'] > 0 else ''}{c['delta_systolic']} mmHg"
+            )
+
+    # Cross-stream pairings
+    paired = stats.get("paired_readings", [])
+    if paired:
+        sections.append(f"\n--- TEMPORAL CROSS-STREAM PAIRINGS (BP + Glucose within ±2 hours) ---")
+        sections.append(f"  Total paired windows: {len(paired)}")
+        post_meal_elevated = [p for p in paired if p.get("glucose_mg_dl", 0) >= 140]
+        if post_meal_elevated:
+            avg_sys_paired = round(sum(p["systolic"] or 0 for p in post_meal_elevated) / len(post_meal_elevated), 1)
+            avg_glu_paired = round(sum(p["glucose_mg_dl"] for p in post_meal_elevated) / len(post_meal_elevated), 1)
+            sections.append(
+                f"  Elevated glucose windows (≥140 mg/dL): {len(post_meal_elevated)} events | "
+                f"Average glucose in these windows: {avg_glu_paired} mg/dL | "
+                f"Average systolic in same windows: {avg_sys_paired} mmHg"
+            )
+
+    # Acute / urgent events
+    urgent_events = stats.get("urgent_events", [])
+    if urgent_events:
+        sections.append(f"\n--- ACUTE CLINICAL EVENTS ---")
+        for evt in urgent_events:
+            if evt["type"] == "hypertensive_crisis_warning":
+                sections.append(
+                    f"  [HYPERTENSIVE CRISIS] {evt.get('recorded_at', 'unknown time')}: "
+                    f"SYS={evt.get('systolic')}, DIA={evt.get('diastolic')} mmHg "
+                    f"| Associated symptoms: {', '.join(evt.get('issues', [])) or 'none reported'}"
+                )
+            elif evt["type"] == "severe_hypoglycemia":
+                sections.append(f"  [SEVERE HYPOGLYCEMIA] {evt.get('recorded_at', 'unknown time')}: {evt.get('glucose_mg_dl')} mg/dL")
+            elif evt["type"] == "severe_hyperglycemia":
+                sections.append(f"  [SEVERE HYPERGLYCEMIA] {evt.get('recorded_at', 'unknown time')}: {evt.get('glucose_mg_dl')} mg/dL")
+
+    # Weight shifts
+    weight_shifts = stats.get("weight_shifts", [])
+    if weight_shifts:
+        sections.append(f"\n--- RAPID WEIGHT SHIFTS ---")
+        for ws in weight_shifts:
+            sections.append(f"  +{ws['delta_kg']} kg over {ws['hours']} hours at {ws.get('recorded_at', 'unknown time')}")
+
+    sections.append(
+        "\n=== INSTRUCTIONS ===\n"
+        "Apply your 4-step Temporal Chain-of-Thought methodology to the statistics above.\n"
+        "Ground every number you cite in the provided data. Do not invent any values.\n"
+        "Return valid JSON only."
+    )
+
+    return "\n".join(sections)
 
 
 def generate_correlation_insights(
@@ -494,7 +638,9 @@ def generate_correlation_insights(
     stats: Dict[str, Any]
 ) -> HealthAnalysisResponse:
     """
-    Calls Gemini using gemini-flash-latest (or fallback) with deterministic statistics.
+    Calls Gemini using gemini-flash-latest (or fallback models) with deterministic
+    statistics structured as a temporally-ordered clinical data payload.
+    Implements Chain-of-Thought temporal reasoning from Kruse et al. (PMC12702291).
     Falls back gracefully to heuristic rule engine if offline or rate limited.
     """
     client = get_gemini_client()
@@ -502,12 +648,8 @@ def generate_correlation_insights(
         print("[AnalysisService] No GEMINI_API_KEY found. Utilizing deterministic heuristic analysis engine.")
         return generate_heuristic_correlations(user_id, stats)
 
-    # Prepare data payload for Gemini
-    prompt_payload = {
-        "instruction": "Analyze these pre-aggregated clinical statistics and generate structured findings.",
-        "user_statistics": stats
-    }
-    content = json.dumps(prompt_payload, indent=2)
+    # Build grounded, temporally-structured input (RAG-style grounding as per paper)
+    content = _build_temporal_content(stats)
 
     model_names = ["gemini-flash-latest", "gemini-1.5-flash", "gemini-2.5-flash"]
     last_error = None
@@ -523,15 +665,23 @@ def generate_correlation_insights(
             cleaned = _clean_json_string(response.text)
             data = json.loads(cleaned)
 
+            # Log the temporal reasoning trace for observability
+            trace = data.get("temporal_reasoning_trace", "")
+            if trace:
+                print(f"[AnalysisService] Temporal reasoning trace: {trace[:200]}")
+
             # Build correlations list
             correlations: List[CorrelationItem] = []
+            valid_categories = {"lifestyle_trigger", "metabolic_cardiovascular", "symptom_spike", "longitudinal_trend", "medication_response", "fluid_weight_shift", "other"}
+            valid_confidences = {"high", "moderate", "low"}
+
             for item in data.get("correlations", []):
                 try:
                     category = item.get("category", "other")
-                    if category not in {"lifestyle_trigger", "metabolic_cardiovascular", "symptom_spike", "longitudinal_trend", "medication_response", "fluid_weight_shift", "other"}:
+                    if category not in valid_categories:
                         category = "other"
                     confidence = item.get("confidence", "moderate")
-                    if confidence not in {"high", "moderate", "low"}:
+                    if confidence not in valid_confidences:
                         confidence = "moderate"
 
                     correlations.append(CorrelationItem(
@@ -546,7 +696,7 @@ def generate_correlation_insights(
                     print(f"[AnalysisService] Notice: Skipping malformed correlation item: {parse_item_err}")
 
             urgent_alerts = [str(a).strip() for a in data.get("urgent_alerts", []) if str(a).strip()]
-            doctor_summary = str(data.get("doctor_summary", "")).strip() or "Clinical review generated from recorded data streams."
+            doctor_summary = str(data.get("doctor_summary", "")).strip() or "Clinical review generated from recorded longitudinal data streams."
 
             now_iso = datetime.now(timezone.utc).isoformat()
             m_bp = stats.get("morning_avg_bp")
@@ -578,6 +728,7 @@ def generate_correlation_insights(
             last_error = e
             continue
 
+
     print(f"[AnalysisService] All Gemini models failed ({last_error}). Falling back to deterministic heuristic engine.")
     return generate_heuristic_correlations(user_id, stats)
 
@@ -585,6 +736,7 @@ def generate_correlation_insights(
 # =====================================================================
 # 4. Caching Layer (Firestore 1-Hour Expiry & Invalidation)
 # =====================================================================
+
 
 def get_or_compute_analysis(
     user_id: str,
