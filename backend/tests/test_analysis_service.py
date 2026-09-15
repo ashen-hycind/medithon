@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from schemas import HealthAnalysisResponse, CorrelationItem, AnalysisStats
 from services.analysis_service import (
     preaggregate_health_data,
+    detect_exact_patterns,
     generate_heuristic_correlations,
     generate_correlation_insights,
     get_or_compute_analysis,
@@ -307,5 +308,154 @@ class TestAnalysisApiEndpoint(unittest.TestCase):
             self.assertEqual(data["user_id"], "test_uid_123")
 
 
+class TestExactPatternDetection(unittest.TestCase):
+    def test_linear_trend_rising_falling_stable(self):
+        # 5 readings rising by 6 mmHg each
+        rising_bp = [
+            {"id": f"bp_{i}", "recorded_at": f"2026-09-1{i}T10:00:00Z", "values": {"systolic": 120 + i * 6, "diastolic": 80}}
+            for i in range(5)
+        ]
+        res = detect_exact_patterns(rising_bp, [])
+        trend = res["bp_trend"]
+        self.assertEqual(trend["trend_label"], "rising")
+        self.assertEqual(trend["ols_slope_mmhg_per_reading"], 6.0)
+        self.assertEqual(trend["first_systolic"], 120)
+        self.assertEqual(trend["last_systolic"], 144)
+        self.assertEqual(trend["absolute_change_mmhg"], 24.0)
+
+        # 4 readings falling by 5 mmHg each
+        falling_bp = [
+            {"id": f"bp_{i}", "recorded_at": f"2026-09-1{i}T10:00:00Z", "values": {"systolic": 150 - i * 5, "diastolic": 85}}
+            for i in range(4)
+        ]
+        res_falling = detect_exact_patterns(falling_bp, [])
+        self.assertEqual(res_falling["bp_trend"]["trend_label"], "falling")
+        self.assertEqual(res_falling["bp_trend"]["ols_slope_mmhg_per_reading"], -5.0)
+
+        # Stable readings (slope 0)
+        stable_bp = [
+            {"id": f"bp_{i}", "recorded_at": f"2026-09-1{i}T10:00:00Z", "values": {"systolic": 122, "diastolic": 80}}
+            for i in range(4)
+        ]
+        res_stable = detect_exact_patterns(stable_bp, [])
+        self.assertEqual(res_stable["bp_trend"]["trend_label"], "stable")
+        self.assertEqual(res_stable["bp_trend"]["ols_slope_mmhg_per_reading"], 0.0)
+
+    def test_aha_staging_distribution(self):
+        records = [
+            {"id": "1", "recorded_at": "2026-09-10T10:00:00Z", "values": {"systolic": 115, "diastolic": 75}},  # Normal
+            {"id": "2", "recorded_at": "2026-09-11T10:00:00Z", "values": {"systolic": 125, "diastolic": 78}},  # Elevated
+            {"id": "3", "recorded_at": "2026-09-12T10:00:00Z", "values": {"systolic": 134, "diastolic": 82}},  # Stage 1
+            {"id": "4", "recorded_at": "2026-09-13T10:00:00Z", "values": {"systolic": 145, "diastolic": 92}},  # Stage 2
+            {"id": "5", "recorded_at": "2026-09-14T10:00:00Z", "values": {"systolic": 185, "diastolic": 125}}, # Crisis
+        ]
+        patterns = detect_exact_patterns(records, [])
+        dist = patterns["bp_stage_distribution"]
+
+        self.assertEqual(dist["Normal"]["count"], 1)
+        self.assertEqual(dist["Normal"]["pct"], 20.0)
+        self.assertEqual(dist["Elevated"]["count"], 1)
+        self.assertEqual(dist["Stage 1 Hypertension"]["count"], 1)
+        self.assertEqual(dist["Stage 2 Hypertension"]["count"], 1)
+        self.assertEqual(dist["Hypertensive Crisis"]["count"], 1)
+
+    def test_consecutive_elevated_streaks(self):
+        records = [
+            {"id": "1", "recorded_at": "2026-09-10T10:00:00Z", "values": {"systolic": 118, "diastolic": 76}},  # Normal
+            {"id": "2", "recorded_at": "2026-09-11T10:00:00Z", "values": {"systolic": 135, "diastolic": 85}},  # Stage 1
+            {"id": "3", "recorded_at": "2026-09-12T10:00:00Z", "values": {"systolic": 142, "diastolic": 92}},  # Stage 2
+            {"id": "4", "recorded_at": "2026-09-13T10:00:00Z", "values": {"systolic": 138, "diastolic": 88}},  # Stage 1
+            {"id": "5", "recorded_at": "2026-09-14T10:00:00Z", "values": {"systolic": 116, "diastolic": 74}},  # Normal
+            {"id": "6", "recorded_at": "2026-09-15T10:00:00Z", "values": {"systolic": 132, "diastolic": 82}},  # Stage 1
+        ]
+        patterns = detect_exact_patterns(records, [])
+        streak = patterns["consecutive_elevated_streak"]
+        self.assertEqual(streak["max_streak"], 3)
+        self.assertEqual(streak["current_streak"], 1)
+
+    def test_pulse_pressure_statistics(self):
+        records = [
+            {"id": "1", "recorded_at": "2026-09-10T10:00:00Z", "values": {"systolic": 150, "diastolic": 80}},  # PP = 70 (wide)
+            {"id": "2", "recorded_at": "2026-09-11T10:00:00Z", "values": {"systolic": 120, "diastolic": 80}},  # PP = 40 (normal)
+            {"id": "3", "recorded_at": "2026-09-12T10:00:00Z", "values": {"systolic": 145, "diastolic": 75}},  # PP = 70 (wide)
+        ]
+        patterns = detect_exact_patterns(records, [])
+        pp = patterns["pulse_pressure_stats"]
+        self.assertIsNotNone(pp)
+        self.assertEqual(pp["mean_mmhg"], 60.0)
+        self.assertEqual(pp["min_mmhg"], 40)
+        self.assertEqual(pp["max_mmhg"], 70)
+        self.assertEqual(pp["wide_pp_count"], 2)
+        self.assertEqual(pp["narrow_pp_count"], 0)
+
+    def test_glycemic_variability_cv(self):
+        glucose_records = [
+            {"id": "g1", "recorded_at": "2026-09-10T08:00:00Z", "values": {"glucose_value": 80, "unit": "mg/dL"}},
+            {"id": "g2", "recorded_at": "2026-09-10T12:00:00Z", "values": {"glucose_value": 180, "unit": "mg/dL"}},
+            {"id": "g3", "recorded_at": "2026-09-10T18:00:00Z", "values": {"glucose_value": 100, "unit": "mg/dL"}},
+        ]
+        patterns = detect_exact_patterns([], glucose_records)
+        glu_cv = patterns["glucose_variability_cv"]
+        self.assertIsNotNone(glu_cv)
+        self.assertEqual(glu_cv["min_mg_dl"], 80.0)
+        self.assertEqual(glu_cv["max_mg_dl"], 180.0)
+        self.assertEqual(glu_cv["range_mg_dl"], 100.0)
+        self.assertGreater(glu_cv["cv_pct"], 20.0)
+
+    def test_symptom_cooccurrence_matrix(self):
+        bp_records = [
+            {
+                "id": "bp_1",
+                "recorded_at": "2026-09-10T10:00:00Z",
+                "values": {"systolic": 145, "diastolic": 92}, # Stage 2
+                "issues": [{"tag": "poor_sleep", "label": "Poor Sleep"}]
+            },
+            {
+                "id": "bp_2",
+                "recorded_at": "2026-09-11T10:00:00Z",
+                "values": {"systolic": 142, "diastolic": 90}, # Stage 2
+                "issues": [{"tag": "poor_sleep", "label": "Poor Sleep"}]
+            },
+            {
+                "id": "bp_3",
+                "recorded_at": "2026-09-12T10:00:00Z",
+                "values": {"systolic": 118, "diastolic": 76}, # Normal
+                "issues": []
+            }
+        ]
+        patterns = detect_exact_patterns(bp_records, [])
+        co = patterns["symptom_co_occurrence"]
+        self.assertIn("poor_sleep", co)
+        ps = co["poor_sleep"]
+        self.assertEqual(ps["total_occurrences"], 2)
+        self.assertEqual(ps["co_occurring_with_stage1_plus"], 2)
+        self.assertEqual(ps["elevated_bp_rate_pct"], 100.0)
+        self.assertEqual(ps["avg_systolic_when_present"], 143.5)
+
+    def test_heuristic_correlations_with_patterns(self):
+        # 5 rising BP readings with poor sleep
+        bp_records = [
+            {
+                "id": f"bp_{i}",
+                "recorded_at": f"2026-09-1{i}T10:00:00Z",
+                "values": {"systolic": 130 + i * 4, "diastolic": 70}, # PP = 60, 64, 68, 72, 76 (all wide PP!)
+                "issues": [{"tag": "poor_sleep"}] if i < 3 else []
+            }
+            for i in range(5)
+        ]
+        stats = preaggregate_health_data(bp_records, [])
+        res = generate_heuristic_correlations(user_id="pattern_user", stats=stats)
+
+        # Check that patterns are populated in response
+        self.assertIsNotNone(res.patterns)
+        self.assertIn("bp_trend", res.patterns)
+
+        # Check correlations generated
+        categories = [c.category for c in res.correlations]
+        self.assertIn("longitudinal_trend", categories)
+        self.assertIn("metabolic_cardiovascular", categories)
+
+
 if __name__ == "__main__":
     unittest.main()
+

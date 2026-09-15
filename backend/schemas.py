@@ -224,6 +224,7 @@ class HealthAnalysisResponse(BaseModel):
     generated_at: str
     is_cached: bool = False
     stats: AnalysisStats
+    patterns: Optional[dict[str, Any]] = None
     correlations: list[CorrelationItem] = Field(default_factory=list)
     urgent_alerts: list[str] = Field(default_factory=list)
     doctor_summary: str

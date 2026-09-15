@@ -293,7 +293,395 @@ def preaggregate_health_data(
                             "recorded_at": curr_w.get("recorded_at")
                         })
 
+    # Run full pattern detection on the raw records
+    stats["patterns"] = detect_exact_patterns(bp_records, glucose_records)
+
     return stats
+
+
+# =====================================================================
+# 1b. Exact Pattern Detection Engine
+# =====================================================================
+
+def _classify_bp_stage(systolic: int, diastolic: int) -> str:
+    """AHA/ACC 2017 blood pressure classification with exact thresholds."""
+    if systolic >= 180 or diastolic >= 120:
+        return "Hypertensive Crisis"
+    if systolic >= 140 or diastolic >= 90:
+        return "Stage 2 Hypertension"
+    if systolic >= 130 or diastolic >= 80:
+        return "Stage 1 Hypertension"
+    if 120 <= systolic < 130 and diastolic < 80:
+        return "Elevated"
+    return "Normal"
+
+
+def _cv_percent(values: List[float]) -> Optional[float]:
+    """Coefficient of Variation (std/mean * 100). Returns None if fewer than 2 values."""
+    if len(values) < 2:
+        return None
+    n = len(values)
+    mean = sum(values) / n
+    if mean == 0:
+        return None
+    variance = sum((v - mean) ** 2 for v in values) / (n - 1)
+    std = variance ** 0.5
+    return round((std / mean) * 100, 1)
+
+
+def _linear_slope(values: List[float]) -> Optional[float]:
+    """
+    Ordinary Least Squares slope of evenly-spaced observations.
+    Positive = rising trend, Negative = falling trend.
+    Returns None if fewer than 3 readings.
+    """
+    n = len(values)
+    if n < 3:
+        return None
+    x_mean = (n - 1) / 2.0
+    y_mean = sum(values) / n
+    numerator = sum((i - x_mean) * (values[i] - y_mean) for i in range(n))
+    denominator = sum((i - x_mean) ** 2 for i in range(n))
+    if denominator == 0:
+        return None
+    return round(numerator / denominator, 3)
+
+
+def detect_exact_patterns(
+    bp_records: List[Dict[str, Any]],
+    glucose_records: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """
+    Computes exact, reproducible pattern detection metrics from raw measurement records.
+    All values are numerically precise — no estimation or rounding beyond stated precision.
+
+    Returns:
+        patterns: dict containing:
+          - bp_trend:              Exact OLS slope of systolic over time + trend label
+          - bp_stage_distribution: Exact count at each AHA/ACC stage
+          - consecutive_elevated_streak: Longest and current run of Stage 1+ readings
+          - pulse_pressure_stats:  Mean, min, max of (SYS - DIA) across all readings
+          - bp_variability_cv:     Coefficient of Variation (%) for systolic and diastolic
+          - glucose_variability_cv: CV% for glucose
+          - time_of_day_heatmap:   Exact avg SYS/DIA/Glucose per 4-hour slot
+          - post_prandial_response: Exact delta from fasting baseline per paired window
+          - symptom_co_occurrence:  For each tag: exact count where SYS >= threshold
+          - bp_percentiles:         25th, 50th, 75th, 90th, 95th percentile of systolic
+    """
+    patterns: Dict[str, Any] = {}
+
+    # --- Sort BP records chronologically ---
+    sorted_bp = sorted(
+        [r for r in bp_records if r.get("values", {}).get("systolic") is not None
+                                and r.get("values", {}).get("diastolic") is not None],
+        key=lambda x: _parse_iso_datetime(x.get("recorded_at")) or datetime.min.replace(tzinfo=timezone.utc)
+    )
+    sys_series = [r["values"]["systolic"] for r in sorted_bp]
+    dia_series = [r["values"]["diastolic"] for r in sorted_bp]
+    pulse_pressures = [s - d for s, d in zip(sys_series, dia_series)]
+
+    # ---- 1. BP Trend (OLS Slope) ----
+    slope = _linear_slope(sys_series)
+    if slope is None:
+        trend_label = "insufficient_data"
+    elif slope > 1.0:
+        trend_label = "rising"
+    elif slope < -1.0:
+        trend_label = "falling"
+    elif abs(slope) <= 1.0 and len(sys_series) >= 3:
+        # check oscillation: count direction changes
+        direction_changes = sum(
+            1 for i in range(1, len(sys_series) - 1)
+            if (sys_series[i] - sys_series[i-1]) * (sys_series[i+1] - sys_series[i]) < 0
+        )
+        trend_label = "oscillating" if direction_changes >= len(sys_series) // 3 else "stable"
+    else:
+        trend_label = "stable"
+
+    patterns["bp_trend"] = {
+        "ols_slope_mmhg_per_reading": slope,
+        "trend_label": trend_label,
+        "reading_count": len(sys_series),
+        "first_systolic": sys_series[0] if sys_series else None,
+        "last_systolic": sys_series[-1] if sys_series else None,
+        "absolute_change_mmhg": round(sys_series[-1] - sys_series[0], 1) if len(sys_series) >= 2 else None
+    }
+
+    # ---- 2. AHA Stage Distribution ----
+    stage_counts: Dict[str, int] = {
+        "Normal": 0,
+        "Elevated": 0,
+        "Stage 1 Hypertension": 0,
+        "Stage 2 Hypertension": 0,
+        "Hypertensive Crisis": 0
+    }
+    for r in sorted_bp:
+        stage = _classify_bp_stage(r["values"]["systolic"], r["values"]["diastolic"])
+        stage_counts[stage] = stage_counts.get(stage, 0) + 1
+
+    total_bp = len(sorted_bp)
+    patterns["bp_stage_distribution"] = {
+        stage: {
+            "count": count,
+            "pct": round(count / total_bp * 100, 1) if total_bp else 0.0
+        }
+        for stage, count in stage_counts.items()
+    }
+
+    # ---- 3. Consecutive Elevated Streak ----
+    # "Elevated" = Stage 1, Stage 2, or Crisis (SYS >= 130 or DIA >= 80)
+    max_streak = 0
+    current_streak = 0
+    for r in sorted_bp:
+        stage = _classify_bp_stage(r["values"]["systolic"], r["values"]["diastolic"])
+        if stage not in {"Normal", "Elevated"}:
+            current_streak += 1
+            max_streak = max(max_streak, current_streak)
+        else:
+            current_streak = 0
+
+    patterns["consecutive_elevated_streak"] = {
+        "max_streak": max_streak,
+        "current_streak": current_streak,  # number of most recent readings that are Stage 1+
+        "interpretation": (
+            "Persistent hypertension pattern" if max_streak >= 3
+            else "Intermittent elevation" if max_streak >= 1
+            else "No persistent elevation detected"
+        )
+    }
+
+    # ---- 4. Pulse Pressure Statistics ----
+    # Normal: 40-60 mmHg. Wide PP > 60 = arterial stiffness risk.
+    if pulse_pressures:
+        pp_mean = round(sum(pulse_pressures) / len(pulse_pressures), 1)
+        pp_min = min(pulse_pressures)
+        pp_max = max(pulse_pressures)
+        wide_pp_count = sum(1 for pp in pulse_pressures if pp > 60)
+        narrow_pp_count = sum(1 for pp in pulse_pressures if pp < 30)
+        patterns["pulse_pressure_stats"] = {
+            "mean_mmhg": pp_mean,
+            "min_mmhg": pp_min,
+            "max_mmhg": pp_max,
+            "wide_pp_count": wide_pp_count,        # PP > 60 mmHg (arterial stiffness risk)
+            "narrow_pp_count": narrow_pp_count,    # PP < 30 mmHg (low cardiac output risk)
+            "clinical_note": (
+                f"Wide pulse pressure detected in {wide_pp_count} reading(s) (PP > 60 mmHg) — associated with arterial stiffness risk."
+                if wide_pp_count > 0
+                else "Pulse pressure within normal range across all readings (30-60 mmHg)."
+            )
+        }
+    else:
+        patterns["pulse_pressure_stats"] = None
+
+    # ---- 5. BP Variability (Coefficient of Variation %) ----
+    sys_cv = _cv_percent([float(v) for v in sys_series])
+    dia_cv = _cv_percent([float(v) for v in dia_series])
+    patterns["bp_variability_cv"] = {
+        "systolic_cv_pct": sys_cv,
+        "diastolic_cv_pct": dia_cv,
+        "interpretation": (
+            "High BP variability detected — visit-to-visit variability may independently predict cardiovascular risk."
+            if (sys_cv or 0) > 10
+            else "BP variability within acceptable range."
+        )
+    }
+
+    # ---- 6. Systolic Percentiles ----
+    if sys_series:
+        sorted_sys = sorted(sys_series)
+        n = len(sorted_sys)
+
+        def _percentile(data: List[float], p: float) -> float:
+            idx = (len(data) - 1) * p / 100
+            lo, hi = int(idx), min(int(idx) + 1, len(data) - 1)
+            return round(data[lo] + (data[hi] - data[lo]) * (idx - lo), 1)
+
+        patterns["bp_percentiles"] = {
+            "p25_systolic": _percentile(sorted_sys, 25),
+            "p50_systolic": _percentile(sorted_sys, 50),
+            "p75_systolic": _percentile(sorted_sys, 75),
+            "p90_systolic": _percentile(sorted_sys, 90),
+            "p95_systolic": _percentile(sorted_sys, 95),
+            "total_readings": n
+        }
+    else:
+        patterns["bp_percentiles"] = None
+
+    # ---- 7. Time-of-Day Heat Map (4-hour buckets) ----
+    # Buckets: Night (00-03), Early Morning (04-07), Morning (08-11),
+    #          Afternoon (12-15), Evening (16-19), Late Night (20-23)
+    HOUR_BUCKETS = [
+        ("00-03 (Night)", 0, 4),
+        ("04-07 (Early Morning)", 4, 8),
+        ("08-11 (Morning)", 8, 12),
+        ("12-15 (Afternoon)", 12, 16),
+        ("16-19 (Evening)", 16, 20),
+        ("20-23 (Late Night)", 20, 24)
+    ]
+    bucket_data: Dict[str, Dict[str, List[float]]] = {
+        label: {"sys": [], "dia": []} for label, _, _ in HOUR_BUCKETS
+    }
+
+    for r in sorted_bp:
+        dt = _parse_iso_datetime(r.get("recorded_at"))
+        if not dt:
+            continue
+        hour = dt.hour
+        for label, start, end in HOUR_BUCKETS:
+            if start <= hour < end:
+                bucket_data[label]["sys"].append(r["values"]["systolic"])
+                bucket_data[label]["dia"].append(r["values"]["diastolic"])
+                break
+
+    heatmap = {}
+    for label, data in bucket_data.items():
+        if data["sys"]:
+            heatmap[label] = {
+                "avg_systolic": round(sum(data["sys"]) / len(data["sys"]), 1),
+                "avg_diastolic": round(sum(data["dia"]) / len(data["dia"]), 1),
+                "count": len(data["sys"])
+            }
+
+    # Also add glucose to heatmap
+    sorted_glu = sorted(
+        [g for g in glucose_records if g.get("values", {}).get("glucose_value") is not None],
+        key=lambda x: _parse_iso_datetime(x.get("recorded_at")) or datetime.min.replace(tzinfo=timezone.utc)
+    )
+    glu_bucket: Dict[str, List[float]] = {label: [] for label, _, _ in HOUR_BUCKETS}
+    for g in sorted_glu:
+        dt = _parse_iso_datetime(g.get("recorded_at"))
+        if not dt:
+            continue
+        glu_val = g["values"]["glucose_value"]
+        unit = g["values"].get("unit", "mg/dL")
+        glu_mg_dl = glu_val * 18.0182 if unit == "mmol/L" else float(glu_val)
+        hour = dt.hour
+        for label, start, end in HOUR_BUCKETS:
+            if start <= hour < end:
+                glu_bucket[label].append(glu_mg_dl)
+                break
+
+    for label, vals in glu_bucket.items():
+        if vals:
+            if label not in heatmap:
+                heatmap[label] = {}
+            heatmap[label]["avg_glucose_mg_dl"] = round(sum(vals) / len(vals), 1)
+            heatmap[label].setdefault("count", 0)
+
+    patterns["time_of_day_heatmap"] = heatmap
+
+    # ---- 8. Post-Prandial BP-Glucose Response ----
+    # For each paired reading (BP + Glucose within ±2 hours):
+    # compute exact delta from the overall fasting glucose baseline
+    all_glu_mg_dl = []
+    for g in glucose_records:
+        val = g.get("values", {}).get("glucose_value")
+        unit = g.get("values", {}).get("unit", "mg/dL")
+        if val is not None:
+            all_glu_mg_dl.append(val * 18.0182 if unit == "mmol/L" else float(val))
+
+    fasting_glu_vals = [
+        g["values"]["glucose_value"] * 18.0182
+        if g["values"].get("unit") == "mmol/L"
+        else float(g["values"]["glucose_value"])
+        for g in glucose_records
+        if g.get("meal_context") == "fasting"
+        and g.get("values", {}).get("glucose_value") is not None
+    ]
+    fasting_baseline = round(sum(fasting_glu_vals) / len(fasting_glu_vals), 1) if fasting_glu_vals else None
+
+    post_prandial_events = []
+    for bp in sorted_bp:
+        bp_dt = _parse_iso_datetime(bp.get("recorded_at"))
+        if not bp_dt:
+            continue
+        for g in sorted_glu:
+            glu_dt = _parse_iso_datetime(g.get("recorded_at"))
+            if not glu_dt:
+                continue
+            diff_sec = abs((bp_dt - glu_dt).total_seconds())
+            if diff_sec <= 7200:
+                glu_val = g["values"]["glucose_value"]
+                unit = g["values"].get("unit", "mg/dL")
+                glu_mg_dl = round(glu_val * 18.0182 if unit == "mmol/L" else float(glu_val), 1)
+                delta_from_fasting = round(glu_mg_dl - fasting_baseline, 1) if fasting_baseline else None
+                post_prandial_events.append({
+                    "recorded_at": bp.get("recorded_at"),
+                    "systolic": bp["values"]["systolic"],
+                    "diastolic": bp["values"]["diastolic"],
+                    "pulse": bp["values"].get("pulse"),
+                    "glucose_mg_dl": glu_mg_dl,
+                    "delta_from_fasting_mg_dl": delta_from_fasting,
+                    "meal_context": g.get("meal_context"),
+                    "time_diff_minutes": round(diff_sec / 60, 1)
+                })
+
+    patterns["post_prandial_response"] = {
+        "fasting_baseline_mg_dl": fasting_baseline,
+        "events": post_prandial_events,
+        "total_paired": len(post_prandial_events),
+        "elevated_glucose_events": sum(1 for e in post_prandial_events if e["glucose_mg_dl"] >= 140),
+        "max_delta_from_fasting": max(
+            (e["delta_from_fasting_mg_dl"] for e in post_prandial_events if e["delta_from_fasting_mg_dl"] is not None),
+            default=None
+        )
+    }
+
+    # ---- 9. Glucose Variability CV ----
+    if all_glu_mg_dl:
+        patterns["glucose_variability_cv"] = {
+            "cv_pct": _cv_percent(all_glu_mg_dl),
+            "min_mg_dl": round(min(all_glu_mg_dl), 1),
+            "max_mg_dl": round(max(all_glu_mg_dl), 1),
+            "range_mg_dl": round(max(all_glu_mg_dl) - min(all_glu_mg_dl), 1),
+            "interpretation": (
+                "High glycemic variability — inconsistent glucose control detected."
+                if (_cv_percent(all_glu_mg_dl) or 0) > 20
+                else "Glucose variability within acceptable range."
+            )
+        }
+    else:
+        patterns["glucose_variability_cv"] = None
+
+    # ---- 10. Symptom Co-occurrence Matrix ----
+    # For each issue tag: count of readings where it co-occurs with Stage 1+ BP
+    tag_cooccurrence: Dict[str, Dict[str, Any]] = {}
+    for r in sorted_bp:
+        stage = _classify_bp_stage(r["values"]["systolic"], r["values"]["diastolic"])
+        is_elevated = stage not in {"Normal", "Elevated"}
+        issues = r.get("issues", [])
+        for issue in issues:
+            tag = issue.get("tag") if isinstance(issue, dict) else getattr(issue, "tag", None)
+            if not tag:
+                continue
+            if tag not in tag_cooccurrence:
+                tag_cooccurrence[tag] = {
+                    "total_occurrences": 0,
+                    "co_occurring_with_stage1_plus": 0,
+                    "avg_systolic_when_present": [],
+                    "avg_diastolic_when_present": []
+                }
+            tag_cooccurrence[tag]["total_occurrences"] += 1
+            tag_cooccurrence[tag]["avg_systolic_when_present"].append(r["values"]["systolic"])
+            tag_cooccurrence[tag]["avg_diastolic_when_present"].append(r["values"]["diastolic"])
+            if is_elevated:
+                tag_cooccurrence[tag]["co_occurring_with_stage1_plus"] += 1
+
+    # Finalize averages
+    for tag, data in tag_cooccurrence.items():
+        sys_vals = data.pop("avg_systolic_when_present")
+        dia_vals = data.pop("avg_diastolic_when_present")
+        data["avg_systolic_when_present"] = round(sum(sys_vals) / len(sys_vals), 1) if sys_vals else None
+        data["avg_diastolic_when_present"] = round(sum(dia_vals) / len(dia_vals), 1) if dia_vals else None
+        data["elevated_bp_rate_pct"] = round(
+            data["co_occurring_with_stage1_plus"] / data["total_occurrences"] * 100, 1
+        ) if data["total_occurrences"] else 0.0
+
+    patterns["symptom_co_occurrence"] = tag_cooccurrence
+
+    return patterns
+
+
 
 
 # =====================================================================
@@ -412,6 +800,88 @@ def generate_heuristic_correlations(
             clinical_suggestion="Consult your healthcare provider promptly if accompanied by lower extremity swelling, shortness of breath, or elevated blood pressure."
         ))
 
+    # 6. Pattern Detection Exact Correlations
+    patterns = stats.get("patterns", {})
+    if patterns:
+        # 6a. BP Trend Direction & OLS Slope
+        bp_trend = patterns.get("bp_trend", {})
+        slope = bp_trend.get("ols_slope_mmhg_per_reading")
+        trend_label = bp_trend.get("trend_label")
+        n_readings = bp_trend.get("reading_count", 0)
+        abs_change = bp_trend.get("absolute_change_mmhg")
+
+        if slope is not None and n_readings >= 3:
+            if trend_label == "rising" and slope > 1.0:
+                correlations.append(CorrelationItem(
+                    category="longitudinal_trend",
+                    confidence="high" if n_readings >= 5 else "moderate",
+                    headline="Upward Blood Pressure Trajectory Detected",
+                    explanation=f"Linear progression reveals a rising systolic trajectory (+{slope} mmHg/reading slope) across {n_readings} sequential readings, shifting from {bp_trend.get('first_systolic')} mmHg to {bp_trend.get('last_systolic')} mmHg (+{abs_change} mmHg net).",
+                    evidence_count=n_readings,
+                    clinical_suggestion="Schedule a follow-up review with your prescribing clinician to reassess anti-hypertensive therapy efficacy."
+                ))
+            elif trend_label == "falling" and slope < -1.0:
+                correlations.append(CorrelationItem(
+                    category="longitudinal_trend",
+                    confidence="high" if n_readings >= 5 else "moderate",
+                    headline="Improving Blood Pressure Trajectory Observed",
+                    explanation=f"Sequential analysis shows a downward systolic trajectory ({slope} mmHg/reading slope) across {n_readings} readings, dropping {abs(abs_change)} mmHg from baseline ({bp_trend.get('first_systolic')} to {bp_trend.get('last_systolic')} mmHg).",
+                    evidence_count=n_readings,
+                    clinical_suggestion="Maintain current lifestyle modifications and treatment protocol."
+                ))
+
+        # 6b. Wide Pulse Pressure
+        pp_stats = patterns.get("pulse_pressure_stats")
+        if pp_stats and pp_stats.get("wide_pp_count", 0) > 0:
+            wide_cnt = pp_stats["wide_pp_count"]
+            correlations.append(CorrelationItem(
+                category="metabolic_cardiovascular",
+                confidence="high" if wide_cnt >= 2 else "moderate",
+                headline="Elevated Pulse Pressure Detected (Arterial Stiffness Risk)",
+                explanation=f"Pulse pressure (systolic minus diastolic) exceeded the 60 mmHg clinical benchmark in {wide_cnt} reading(s), averaging {pp_stats['mean_mmhg']} mmHg (range: {pp_stats['min_mmhg']}-{pp_stats['max_mmhg']} mmHg).",
+                evidence_count=wide_cnt,
+                clinical_suggestion="Discuss elevated pulse pressure with your physician as an indicator of large-artery stiffness and cardiovascular strain."
+            ))
+
+        # 6c. Consecutive Elevated Reading Streaks
+        streak_stats = patterns.get("consecutive_elevated_streak", {})
+        max_streak = streak_stats.get("max_streak", 0)
+        if max_streak >= 3:
+            correlations.append(CorrelationItem(
+                category="longitudinal_trend",
+                confidence="high",
+                headline="Persistent Hypertensive Elevation Streak",
+                explanation=f"Identified {max_streak} consecutive readings meeting Stage 1 or Stage 2 Hypertension criteria without normal intervals, indicating sustained rather than isolated pressure elevation.",
+                evidence_count=max_streak,
+                clinical_suggestion="Persistent elevation requires clinical evaluation to rule out medication non-adherence or need for dosage titration."
+            ))
+
+        # 6d. High Glycemic Variability
+        glu_cv = patterns.get("glucose_variability_cv")
+        if glu_cv and (glu_cv.get("cv_pct") or 0) > 20.0:
+            correlations.append(CorrelationItem(
+                category="metabolic_cardiovascular",
+                confidence="high",
+                headline="Elevated Glycemic Variability Observed",
+                explanation=f"Blood glucose coefficient of variation reached {glu_cv['cv_pct']}% (span: {glu_cv['min_mg_dl']} to {glu_cv['max_mg_dl']} mg/dL, range: {glu_cv['range_mg_dl']} mg/dL), indicating substantial glycemic fluctuations.",
+                evidence_count=stats.get("total_glucose_readings", 1),
+                clinical_suggestion="Consider reviewing meal composition, carbohydrate timing, and discussing glycemic variability with your endocrinologist."
+            ))
+
+        # 6e. Symptom Co-occurrence Matrix
+        symptom_co = patterns.get("symptom_co_occurrence", {})
+        for tag, sc in symptom_co.items():
+            if sc.get("co_occurring_with_stage1_plus", 0) >= 2 and sc.get("elevated_bp_rate_pct", 0) >= 60.0:
+                tag_label = tag.replace("_", " ").title()
+                correlations.append(CorrelationItem(
+                    category="symptom_spike",
+                    confidence="high" if sc["total_occurrences"] >= 3 else "moderate",
+                    headline=f"High Elevation Rate During Reported {tag_label}",
+                    explanation=f"When {tag_label.lower()} was present, {sc['elevated_bp_rate_pct']}% of readings ({sc['co_occurring_with_stage1_plus']}/{sc['total_occurrences']}) reached Stage 1+ hypertension, with systolic averaging {sc['avg_systolic_when_present']} mmHg.",
+                    evidence_count=sc["total_occurrences"],
+                    clinical_suggestion=f"Monitor biometric responses carefully when experiencing {tag_label.lower()}."
+                ))
+
     # Construct synthesized clinical summary
     doc_summary_lines = []
     if stats.get("total_bp_readings"):
@@ -447,6 +917,7 @@ def generate_heuristic_correlations(
             fasting_avg_glucose=stats.get("fasting_avg_glucose"),
             post_meal_avg_glucose=stats.get("post_meal_avg_glucose")
         ),
+        patterns=stats.get("patterns"),
         correlations=correlations,
         urgent_alerts=urgent_alerts,
         doctor_summary=doctor_summary
@@ -623,6 +1094,68 @@ def _build_temporal_content(stats: Dict[str, Any]) -> str:
         for ws in weight_shifts:
             sections.append(f"  +{ws['delta_kg']} kg over {ws['hours']} hours at {ws.get('recorded_at', 'unknown time')}")
 
+    # Exact Pattern Detection Metrics
+    patterns = stats.get("patterns", {})
+    if patterns:
+        sections.append("\n--- EXACT PATTERN DETECTION METRICS ---")
+        
+        # BP Trend
+        bp_t = patterns.get("bp_trend")
+        if bp_t and bp_t.get("ols_slope_mmhg_per_reading") is not None:
+            sections.append(
+                f"  BP Trajectory Trend: {bp_t['trend_label'].upper()} | "
+                f"OLS Slope: {bp_t['ols_slope_mmhg_per_reading']} mmHg/reading | "
+                f"Span: {bp_t.get('first_systolic')} -> {bp_t.get('last_systolic')} mmHg "
+                f"(Δ {bp_t.get('absolute_change_mmhg')} mmHg, n={bp_t.get('reading_count')})"
+            )
+            
+        # AHA Staging
+        stage_dist = patterns.get("bp_stage_distribution")
+        if stage_dist:
+            dist_str = ", ".join([f"{st}: {d['count']} ({d['pct']}%)" for st, d in stage_dist.items() if d['count'] > 0])
+            sections.append(f"  AHA/ACC BP Stage Distribution: {dist_str}")
+
+        # Consecutive Elevated Streak
+        streak = patterns.get("consecutive_elevated_streak")
+        if streak and streak.get("max_streak", 0) > 0:
+            sections.append(f"  Consecutive Elevated Readings: max streak={streak['max_streak']}, current streak={streak['current_streak']} ({streak.get('interpretation', '')})")
+
+        # Pulse Pressure
+        pp = patterns.get("pulse_pressure_stats")
+        if pp:
+            sections.append(
+                f"  Pulse Pressure (SYS-DIA): mean={pp['mean_mmhg']} mmHg, "
+                f"range={pp['min_mmhg']}-{pp['max_mmhg']} mmHg, "
+                f"wide PP (>60 mmHg) count={pp['wide_pp_count']} (arterial stiffness indicator)"
+            )
+
+        # BP Variability CV%
+        bp_cv = patterns.get("bp_variability_cv")
+        if bp_cv and bp_cv.get("systolic_cv_pct") is not None:
+            sections.append(f"  BP Variability (CV%): Systolic CV={bp_cv['systolic_cv_pct']}%, Diastolic CV={bp_cv.get('diastolic_cv_pct')}%, {bp_cv.get('interpretation', '')}")
+
+        # Systolic Percentiles
+        pcts = patterns.get("bp_percentiles")
+        if pcts:
+            sections.append(f"  Systolic Percentiles: p25={pcts['p25_systolic']}, p50={pcts['p50_systolic']}, p75={pcts['p75_systolic']}, p90={pcts['p90_systolic']}, p95={pcts['p95_systolic']} mmHg")
+
+        # Glycemic Variability CV%
+        glu_cv = patterns.get("glucose_variability_cv")
+        if glu_cv and glu_cv.get("cv_pct") is not None:
+            sections.append(f"  Glycemic Variability (CV%): CV={glu_cv['cv_pct']}%, min={glu_cv['min_mg_dl']}, max={glu_cv['max_mg_dl']}, range={glu_cv['range_mg_dl']} mg/dL ({glu_cv.get('interpretation', '')})")
+
+        # Symptom Co-occurrence Matrix
+        sym_co = patterns.get("symptom_co_occurrence")
+        if sym_co:
+            sections.append("  Symptom Co-occurrence Matrix with Elevated BP:")
+            for tag, sc in sym_co.items():
+                tag_label = tag.replace("_", " ").title()
+                sections.append(
+                    f"    [{tag_label}]: {sc['total_occurrences']} logs | "
+                    f"Co-occurring with Stage 1+ BP: {sc['co_occurring_with_stage1_plus']} ({sc['elevated_bp_rate_pct']}%) | "
+                    f"Avg SYS when present: {sc['avg_systolic_when_present']} mmHg"
+                )
+
     sections.append(
         "\n=== INSTRUCTIONS ===\n"
         "Apply your 4-step Temporal Chain-of-Thought methodology to the statistics above.\n"
@@ -718,6 +1251,7 @@ def generate_correlation_insights(
                     fasting_avg_glucose=stats.get("fasting_avg_glucose"),
                     post_meal_avg_glucose=stats.get("post_meal_avg_glucose")
                 ),
+                patterns=stats.get("patterns"),
                 correlations=correlations,
                 urgent_alerts=urgent_alerts,
                 doctor_summary=doctor_summary
