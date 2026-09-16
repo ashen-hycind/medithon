@@ -170,7 +170,7 @@ export function ScanModal({
       let result: ScanExtractionResponse | null = null;
 
       try {
-        result = await scanBloodPressureImage(file);
+        result = await scanBloodPressureImage(file, deviceType);
       } catch (apiErr: any) {
         console.warn('Live OCR failed or rate limited, applying fallback extraction:', apiErr);
         if (deviceType === 'pulse_oximeter') {
