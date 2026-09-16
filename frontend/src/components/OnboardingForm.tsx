@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { UserProfile, BloodGroupType, SexType } from '../types';
 import { Heart, Activity, User, Calendar, Droplets, Ruler, Weight, Baby, Briefcase, CheckCircle2 } from 'lucide-react';
+import { saveUserProfile } from '../services/measurementService';
 
 interface OnboardingFormProps {
   token: string;
@@ -46,21 +47,7 @@ export const OnboardingForm: React.FC<OnboardingFormProps> = ({ token, onComplet
 
     try {
       setLoading(true);
-      const res = await fetch('/api/users/profile', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ' + token
-        },
-        body: JSON.stringify(payload)
-      });
-
-      if (!res.ok) {
-        const errData = await res.json();
-        throw new Error(errData.detail || 'Failed to save health profile');
-      }
-
-      const saved = await res.json();
+      const saved = await saveUserProfile(payload, token);
       onComplete(saved);
     } catch (err: any) {
       setError(err.message || 'Error saving health profile');

@@ -50,7 +50,7 @@ export const DoctorReportView: React.FC<DoctorReportViewProps> = ({
     setError(null);
 
     try {
-      const blob = await generateDoctorReportPdf(token);
+      const blob = await generateDoctorReportPdf(token, profile);
       // Revoke previous URL if any
       if (pdfBlobUrl) {
         URL.revokeObjectURL(pdfBlobUrl);

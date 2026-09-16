@@ -9,7 +9,12 @@ import { DesktopDashboard } from './components/DesktopDashboard';
 import { UserProfile, BloodPressureMeasurement, BloodGlucoseMeasurement } from './types';
 import { Activity, Scale } from 'lucide-react';
 import { ScanModal } from './components/ScanModal';
-import { getBloodPressureMeasurements, getBloodGlucoseMeasurements } from './services/measurementService';
+import {
+  getBloodPressureMeasurements,
+  getBloodGlucoseMeasurements,
+  getUserProfile,
+  updateUserWeight
+} from './services/measurementService';
 
 export function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -54,15 +59,10 @@ export function App() {
         try {
           const idToken = await currentUser.getIdToken();
           setToken(idToken);
-          const res = await fetch('/api/users/profile', {
-            headers: { 'Authorization': 'Bearer ' + idToken }
-          });
-          if (res.ok) {
-            const data = await res.json();
-            setProfile(data);
+          const loadedProfile = await getUserProfile(idToken, currentUser.uid);
+          setProfile(loadedProfile);
+          if (loadedProfile) {
             loadMeasurements(idToken);
-          } else {
-            setProfile(null);
           }
         } catch (err) {
           console.error('Error fetching user profile:', err);
@@ -89,19 +89,11 @@ export function App() {
     if (!token || !newWeight) return;
     try {
       setWeightLoading(true);
-      const res = await fetch('/api/users/weight', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ' + token
-        },
-        body: JSON.stringify({ weight_kg: parseFloat(newWeight) })
-      });
-      if (res.ok) {
-        setProfile(prev => prev ? { ...prev, weight_kg: parseFloat(newWeight) } : null);
-        setShowWeightModal(false);
-        setNewWeight('');
-      }
+      const val = parseFloat(newWeight);
+      await updateUserWeight(val, token, user?.uid);
+      setProfile(prev => prev ? { ...prev, weight_kg: val } : null);
+      setShowWeightModal(false);
+      setNewWeight('');
     } catch (err) {
       console.error('Failed to update weight:', err);
     } finally {

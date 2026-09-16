@@ -1,10 +1,11 @@
-﻿import React, { useState } from 'react';
+import React, { useState } from 'react';
 import { ShieldCheck, Check } from 'lucide-react';
 import { UserProfile, BloodGroupType, SexType } from '../types';
 import { Step1Identity } from './Step1Identity';
 import { Step2Vitals } from './Step2Vitals';
 import { Step3Parameters } from './Step3Parameters';
 import { Step4Review } from './Step4Review';
+import { saveUserProfile } from '../services/measurementService';
 
 interface OnboardingFlowProps {
   token: string;
@@ -101,21 +102,7 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
 
     try {
       setLoading(true);
-      const res = await fetch('/api/users/profile', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ' + token
-        },
-        body: JSON.stringify(payload)
-      });
-
-      if (!res.ok) {
-        const errData = await res.json();
-        throw new Error(errData.detail || 'Failed to save health profile');
-      }
-
-      const saved = await res.json();
+      const saved = await saveUserProfile(payload, token);
       onComplete(saved);
     } catch (err: any) {
       setError(err.message || 'Error saving health profile');

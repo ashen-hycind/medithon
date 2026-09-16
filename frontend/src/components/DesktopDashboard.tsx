@@ -5,7 +5,15 @@ import SubtleEdgeDecorations from './SubtleEdgeDecorations';
 import { UserProfile, BloodPressureMeasurement, BloodGlucoseMeasurement, WeightRecord, HealthAnalysisResponse, CorrelationItem } from '../types';
 import RecordsView from './RecordsView';
 import { DoctorReportView } from './DoctorReportView';
-import { getHealthCorrelations, triggerFreshAnalysis } from '../services/measurementService';
+import {
+  getBloodPressureMeasurements,
+  getBloodGlucoseMeasurements,
+  getSpO2Measurements,
+  getWeightHistory,
+  getWeightMeasurements,
+  getHealthCorrelations,
+  triggerFreshAnalysis
+} from '../services/measurementService';
 import {
   Camera,
   Activity,
@@ -359,22 +367,12 @@ export const DesktopDashboard: React.FC<DesktopDashboardProps> = ({
       if (!token) return;
       try {
         setLoadingMeasurements(true);
-        const [bpRes, bgRes, spo2Res, weightHistRes, weightMeasRes, analysisData] = await Promise.all([
-          fetch('/api/measurements/blood-pressure?limit=50', {
-            headers: { Authorization: `Bearer ${token}` }
-          }),
-          fetch('/api/measurements/blood-glucose?limit=50', {
-            headers: { Authorization: `Bearer ${token}` }
-          }),
-          fetch('/api/measurements/spo2?limit=50', {
-            headers: { Authorization: `Bearer ${token}` }
-          }),
-          fetch('/api/users/weight/history?limit=50', {
-            headers: { Authorization: `Bearer ${token}` }
-          }),
-          fetch('/api/measurements/weight?limit=50', {
-            headers: { Authorization: `Bearer ${token}` }
-          }),
+        const [bpData, bgData, spo2Data, weightData, weightMData, analysisData] = await Promise.all([
+          getBloodPressureMeasurements(token, 50),
+          getBloodGlucoseMeasurements(token, 50),
+          getSpO2Measurements(token, 50),
+          getWeightHistory(token, 50),
+          getWeightMeasurements(token, 50),
           getHealthCorrelations(token, true).catch(err => {
             console.warn('Could not fetch health correlations:', err);
             return null;
@@ -382,29 +380,12 @@ export const DesktopDashboard: React.FC<DesktopDashboardProps> = ({
         ]);
 
         if (isMounted) {
-          if (bpRes.ok) {
-            const bpData = await bpRes.json();
-            setBpMeasurements(bpData);
-          }
-          if (bgRes.ok) {
-            const bgData = await bgRes.json();
-            setGlucoseMeasurements(bgData);
-          }
-          if (spo2Res.ok) {
-            const spo2Data = await spo2Res.json();
-            setSpo2Measurements(spo2Data);
-          }
-          if (weightHistRes.ok) {
-            const weightData = await weightHistRes.json();
-            setWeightRecords(weightData);
-          }
-          if (weightMeasRes.ok) {
-            const weightMData = await weightMeasRes.json();
-            setWeightMeasurements(weightMData);
-          }
-          if (analysisData) {
-            setAnalysis(analysisData);
-          }
+          if (bpData) setBpMeasurements(bpData);
+          if (bgData) setGlucoseMeasurements(bgData);
+          if (spo2Data) setSpo2Measurements(spo2Data);
+          if (weightData) setWeightRecords(weightData);
+          if (weightMData) setWeightMeasurements(weightMData);
+          if (analysisData) setAnalysis(analysisData);
         }
       } catch (err) {
         console.error('Error fetching measurements for dashboard:', err);
