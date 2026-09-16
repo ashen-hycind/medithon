@@ -1,27 +1,30 @@
-# Environment & Secrets
+# Environment variables & secrets
 .env
 *.env
-serviceAccountKey.json
-*.key
+!.env.example
+*serviceAccountKey*.json
 *.pem
+*.key
 
-# Python
-__pycache__/
-*.py[cod]
-*.class
-venv/
-.venv/
-
-# Node
+# Dependencies
 node_modules/
+frontend/node_modules/
+backend/venv/
+venv/
+
+# Build artifacts & Firebase cache
+frontend/dist/
 dist/
-build/
-.next/
+.firebase/
 *.tsbuildinfo
 
-# Firebase
-.firebase/
+# Python cache & testing
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
 
-# OS
+# OS files
 .DS_Store
 Thumbs.db
+
