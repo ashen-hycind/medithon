@@ -4,7 +4,8 @@ import {
   BloodPressureMeasurementCreate,
   BloodPressureMeasurement,
   BloodGlucoseMeasurementCreate,
-  BloodGlucoseMeasurement
+  BloodGlucoseMeasurement,
+  HealthAnalysisResponse
 } from '../types';
 
 export async function scanBloodPressureImage(file: File): Promise<ScanExtractionResponse> {
@@ -116,6 +117,43 @@ export async function getBloodGlucoseMeasurements(
   if (!res.ok) {
     const errorData = await res.json().catch(() => ({}));
     throw new Error(errorData.detail || 'Failed to fetch blood glucose history.');
+  }
+
+  return res.json();
+}
+
+export async function getHealthCorrelations(
+  token: string,
+  forceRefresh: boolean = false
+): Promise<HealthAnalysisResponse> {
+  const url = `/api/analysis/correlations${forceRefresh ? '?force_refresh=true' : ''}`;
+  const res = await fetch(url, {
+    headers: {
+      'Authorization': `Bearer ${token}`
+    },
+  });
+
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || 'Failed to fetch clinical correlation analysis.');
+  }
+
+  return res.json();
+}
+
+export async function triggerFreshAnalysis(
+  token: string
+): Promise<HealthAnalysisResponse> {
+  const res = await fetch('/api/analysis/generate', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`
+    },
+  });
+
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || 'Failed to trigger fresh clinical analysis.');
   }
 
   return res.json();
