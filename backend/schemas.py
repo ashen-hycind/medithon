@@ -72,6 +72,7 @@ class BloodPressureValues(BaseModel):
     systolic: int = Field(..., ge=40, le=300, description="Systolic blood pressure in mmHg")
     diastolic: int = Field(..., ge=30, le=200, description="Diastolic blood pressure in mmHg")
     pulse: Optional[int] = Field(None, ge=30, le=250, description="Pulse rate in bpm")
+    spo2: Optional[int] = Field(None, ge=50, le=100, description="Blood oxygen saturation percentage from Pulse Oximeter")
 
     @model_validator(mode="after")
     def validate_pressure_differential(self):
@@ -136,13 +137,14 @@ class BloodPressureMeasurementCreate(BaseModel):
     source: Literal["camera", "screenshot", "manual"] = "camera"
     scan_id: Optional[str] = None
     device_model: Optional[str] = None
+    device_type: Optional[str] = Field(default="Sphygmomanometer", description="Device modality e.g. Sphygmomanometer, Pulse Oximeter")
 
 class BloodPressureMeasurementResponse(BaseModel):
     id: str
     user_id: str
     recorded_at: str
     values: BloodPressureValues
-    units: dict[str, str] = Field(default_factory=lambda: {"systolic": "mmHg", "diastolic": "mmHg", "pulse": "bpm"})
+    units: dict[str, str] = Field(default_factory=lambda: {"systolic": "mmHg", "diastolic": "mmHg", "pulse": "bpm", "spo2": "%"})
     clinical_stage: str # "Normal", "Elevated", "Stage 1", "Stage 2", "Hypertensive Crisis"
     has_red_flags: bool = False
     safety_alerts: list[str] = Field(default_factory=list)
@@ -151,6 +153,7 @@ class BloodPressureMeasurementResponse(BaseModel):
     source: str
     scan_id: Optional[str] = None
     device_model: Optional[str] = None
+    device_type: Optional[str] = "Sphygmomanometer"
     created_at: str
     updated_at: str
 
@@ -163,6 +166,7 @@ class BloodGlucoseMeasurementCreate(BaseModel):
     source: Literal["camera", "screenshot", "manual"] = "camera"
     scan_id: Optional[str] = None
     device_model: Optional[str] = None
+    device_type: Optional[str] = Field(default="Glucometer", description="Device modality e.g. Glucometer")
 
 class BloodGlucoseMeasurementResponse(BaseModel):
     id: str
@@ -179,6 +183,7 @@ class BloodGlucoseMeasurementResponse(BaseModel):
     source: str
     scan_id: Optional[str] = None
     device_model: Optional[str] = None
+    device_type: Optional[str] = "Glucometer"
     created_at: str
     updated_at: str
 
@@ -194,6 +199,7 @@ CorrelationCategory = Literal[
     "longitudinal_trend",
     "medication_response",
     "fluid_weight_shift",
+    "multi_device_correlation",
     "other"
 ]
 
@@ -210,14 +216,18 @@ class CorrelationItem(BaseModel):
 class AnalysisStats(BaseModel):
     total_bp_readings: int = Field(default=0, ge=0)
     total_glucose_readings: int = Field(default=0, ge=0)
+    total_weight_readings: Optional[int] = Field(default=0, ge=0)
+    devices_detected: Optional[list[str]] = Field(default_factory=list)
     avg_systolic: Optional[float] = None
     avg_diastolic: Optional[float] = None
     avg_pulse: Optional[float] = None
     avg_glucose_mg_dl: Optional[float] = None
+    avg_spo2: Optional[float] = None
     morning_avg_bp: Optional[dict[str, float]] = None
     evening_avg_bp: Optional[dict[str, float]] = None
     fasting_avg_glucose: Optional[float] = None
     post_meal_avg_glucose: Optional[float] = None
+    trajectory_7d_vs_14d: Optional[dict[str, Any]] = None
 
 class RoteMemoryState(BaseModel):
     session_resumed: bool = False

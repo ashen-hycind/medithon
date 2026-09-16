@@ -751,24 +751,38 @@ export const DesktopDashboard: React.FC<DesktopDashboardProps> = ({
                 </p>
               </div>
 
-              {/* Insight Tabs (Insight 1, 2, 3) */}
+              {/* Insight Tabs (Supporting Multi-Device, Trends, Triggers) */}
               <div className="flex items-center bg-[#f8fafc] border border-[#e2e8f0] rounded-[10px] p-1 gap-1 flex-wrap">
                 {(analysis?.correlations && analysis.correlations.length > 0
-                  ? analysis.correlations.slice(0, 4)
+                  ? analysis.correlations.slice(0, 6)
                   : [0, 1, 2]
-                ).map((_, idx) => (
-                  <button
-                    key={idx}
-                    onClick={() => setActiveInsightIndex(idx)}
-                    className={`px-3 py-1.5 rounded-[7px] text-[10.5px] font-bold transition ${
-                      activeInsightIndex === idx
-                        ? 'bg-[#1b5879] text-white shadow-xs'
-                        : 'text-[#536b78] hover:text-slate-800'
-                    }`}
-                  >
-                    Insight {idx + 1}
-                  </button>
-                ))}
+                ).map((item, idx) => {
+                  const label =
+                    typeof item === 'object' && item.category
+                      ? item.category === 'multi_device_correlation'
+                        ? '📱 Multi-Device'
+                        : item.category === 'longitudinal_trend'
+                        ? '📈 Trends'
+                        : item.category === 'lifestyle_trigger'
+                        ? '☕ Lifestyle'
+                        : item.category === 'metabolic_cardiovascular'
+                        ? '🩸 Metabolic'
+                        : `Insight ${idx + 1}`
+                      : `Insight ${idx + 1}`;
+                  return (
+                    <button
+                      key={idx}
+                      onClick={() => setActiveInsightIndex(idx)}
+                      className={`px-3 py-1.5 rounded-[7px] text-[10.5px] font-bold transition ${
+                        activeInsightIndex === idx
+                          ? 'bg-[#1b5879] text-white shadow-xs'
+                          : 'text-[#536b78] hover:text-slate-800'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
@@ -795,14 +809,16 @@ export const DesktopDashboard: React.FC<DesktopDashboardProps> = ({
                   (() => {
                     const currentInsight = analysis.correlations[activeInsightIndex] || analysis.correlations[0];
                     const focusLabel =
-                      currentInsight.category === 'lifestyle_trigger'
+                      currentInsight.category === 'multi_device_correlation'
+                        ? '📱 Multi-Device Telemetry'
+                        : currentInsight.category === 'longitudinal_trend'
+                        ? '📈 Longitudinal Trend'
+                        : currentInsight.category === 'lifestyle_trigger'
                         ? '☕ Lifestyle & Trigger Focus'
                         : currentInsight.category === 'metabolic_cardiovascular'
                         ? '🩸 Metabolic & Cardio Focus'
                         : currentInsight.category === 'symptom_spike'
                         ? '⚠️ Symptom Co-occurrence'
-                        : currentInsight.category === 'longitudinal_trend'
-                        ? '📈 Longitudinal Trajectory'
                         : currentInsight.category === 'fluid_weight_shift'
                         ? '⚖️ Fluid / Weight Shift'
                         : '🫀 Clinical Focus';
@@ -949,12 +965,25 @@ export const DesktopDashboard: React.FC<DesktopDashboardProps> = ({
 
                 {/* Provenance & Inspect Source Action */}
                 <div className="bg-[#c3edf2]/30 border border-[#c3edf2]/70 rounded-[16px] p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <div className="text-[11.5px] font-bold text-[#1b5879]">
-                    {analysis?.stats?.total_bp_readings !== undefined && analysis?.stats?.total_glucose_readings !== undefined
-                      ? `Backed by ${analysis.stats.total_bp_readings + analysis.stats.total_glucose_readings} verified camera readings`
-                      : trendAnalytics.hasData
-                      ? `Backed by ${trendAnalytics.totalReadings} verified camera readings`
-                      : 'Backed by Baseline Calibration'}
+                  <div className="space-y-1">
+                    <div className="text-[11.5px] font-bold text-[#1b5879]">
+                      {analysis?.stats?.devices_detected && analysis.stats.devices_detected.length > 0
+                        ? `Telemetry aggregated across: ${analysis.stats.devices_detected.join(' • ')}`
+                        : analysis?.stats?.total_bp_readings !== undefined && analysis?.stats?.total_glucose_readings !== undefined
+                        ? `Backed by ${analysis.stats.total_bp_readings + analysis.stats.total_glucose_readings} verified readings`
+                        : trendAnalytics.hasData
+                        ? `Backed by ${trendAnalytics.totalReadings} verified camera readings`
+                        : 'Backed by Baseline Calibration'}
+                    </div>
+                    {analysis?.stats?.trajectory_7d_vs_14d && (
+                      <div className="text-[10.5px] text-[#536b78] font-medium">
+                        7-Day Trajectory: {analysis.stats.trajectory_7d_vs_14d.recent_7d_avg_systolic} mmHg{' '}
+                        <span className={analysis.stats.trajectory_7d_vs_14d.delta_systolic <= 0 ? 'text-emerald-700 font-bold' : 'text-amber-700 font-bold'}>
+                          ({analysis.stats.trajectory_7d_vs_14d.delta_systolic > 0 ? '+' : ''}{analysis.stats.trajectory_7d_vs_14d.delta_systolic} mmHg shift)
+                        </span>
+                        {' '}• Status: {analysis.stats.trajectory_7d_vs_14d.direction.toUpperCase()}
+                      </div>
+                    )}
                   </div>
                   <button
                     onClick={() => setShowSourceModal(true)}

@@ -80,6 +80,7 @@ export interface BloodPressureMeasurementCreate {
   source?: 'camera' | 'screenshot' | 'manual';
   scan_id?: string;
   device_model?: string | null;
+  device_type?: string | null;
 }
 
 export interface BloodPressureMeasurement {
@@ -87,7 +88,7 @@ export interface BloodPressureMeasurement {
   user_id: string;
   recorded_at: string;
   values: BloodPressureValues;
-  units: { systolic: string; diastolic: string; pulse: string };
+  units: { systolic: string; diastolic: string; pulse: string; spo2?: string };
   clinical_stage: 'Normal' | 'Elevated' | 'Hypertension Stage 1' | 'Hypertension Stage 2' | 'Hypertensive Crisis' | string;
   has_red_flags: boolean;
   safety_alerts: string[];
@@ -96,6 +97,7 @@ export interface BloodPressureMeasurement {
   source: string;
   scan_id?: string;
   device_model?: string | null;
+  device_type?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -105,6 +107,7 @@ export interface WeightRecord {
   weight_kg: number;
   recorded_at: string;
   source?: string;
+  device_type?: string | null;
 }
 export interface BloodGlucoseMeasurementCreate {
   recorded_at?: string;
@@ -115,6 +118,7 @@ export interface BloodGlucoseMeasurementCreate {
   source?: 'camera' | 'screenshot' | 'manual';
   scan_id?: string;
   device_model?: string | null;
+  device_type?: string | null;
 }
 
 export interface BloodGlucoseMeasurement {
@@ -132,6 +136,7 @@ export interface BloodGlucoseMeasurement {
   source: string;
   scan_id?: string;
   device_model?: string | null;
+  device_type?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -143,6 +148,7 @@ export type CorrelationCategory =
   | 'longitudinal_trend'
   | 'medication_response'
   | 'fluid_weight_shift'
+  | 'multi_device_correlation'
   | 'other';
 
 export type CorrelationConfidence = 'high' | 'moderate' | 'low';
@@ -159,14 +165,18 @@ export interface CorrelationItem {
 export interface AnalysisStats {
   total_bp_readings: number;
   total_glucose_readings: number;
+  total_weight_readings?: number;
+  devices_detected?: string[];
   avg_systolic?: number | null;
   avg_diastolic?: number | null;
   avg_pulse?: number | null;
   avg_glucose_mg_dl?: number | null;
+  avg_spo2?: number | null;
   morning_avg_bp?: { systolic: number; diastolic: number } | null;
   evening_avg_bp?: { systolic: number; diastolic: number } | null;
   fasting_avg_glucose?: number | null;
   post_meal_avg_glucose?: number | null;
+  trajectory_7d_vs_14d?: any;
 }
 
 export interface RoteMemoryState {

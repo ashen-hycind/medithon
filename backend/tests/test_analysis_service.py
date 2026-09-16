@@ -834,6 +834,109 @@ class TestRoteMemoryIntegration(unittest.TestCase):
         self.assertEqual(res.stats.avg_systolic, 120.0)
 
 
+class TestMultiDeviceAndTrendAnalysis(unittest.TestCase):
+    def test_multi_device_preaggregation_and_correlations(self):
+        """Tests that device types (Sphygmomanometer, Glucometer, Pulse Oximeter, Digital Scale) are detected and correlated."""
+        now = datetime.now(timezone.utc)
+        bp_recs = [
+            {
+                "id": "bp_1",
+                "recorded_at": (now - timedelta(days=1)).isoformat(),
+                "values": {"systolic": 142, "diastolic": 90, "pulse": 88, "spo2": 97},
+                "device_type": "Sphygmomanometer",
+                "issues": []
+            },
+            {
+                "id": "bp_2",
+                "recorded_at": (now - timedelta(hours=2)).isoformat(),
+                "values": {"systolic": 140, "diastolic": 88, "pulse": 86, "spo2": 98},
+                "device_type": "Sphygmomanometer",
+                "issues": []
+            }
+        ]
+        glu_recs = [
+            {
+                "id": "glu_1",
+                "recorded_at": (now - timedelta(hours=2, minutes=15)).isoformat(),
+                "values": {"glucose_value": 165.0, "unit": "mg/dL"},
+                "device_type": "Glucometer",
+                "meal_context": "after_meal"
+            }
+        ]
+        weight_recs = [
+            {
+                "recorded_at": (now - timedelta(days=2)).isoformat(),
+                "weight_kg": 78.0,
+                "device_type": "Digital Scale"
+            },
+            {
+                "recorded_at": (now - timedelta(days=1)).isoformat(),
+                "weight_kg": 80.5,
+                "device_type": "Digital Scale"
+            }
+        ]
+
+        stats = preaggregate_health_data(bp_recs, glu_recs, weight_recs)
+        self.assertIn("Sphygmomanometer", stats["devices_detected"])
+        self.assertIn("Glucometer", stats["devices_detected"])
+        self.assertIn("Pulse Oximeter", stats["devices_detected"])
+        self.assertIn("Digital Scale", stats["devices_detected"])
+        self.assertEqual(stats["avg_spo2"], 97.5)
+        self.assertEqual(stats["total_weight_readings"], 2)
+
+        resp = generate_heuristic_correlations("user_multi", stats)
+        categories = [c.category for c in resp.correlations]
+        self.assertIn("multi_device_correlation", categories)
+
+        multi_dev_items = [c for c in resp.correlations if c.category == "multi_device_correlation"]
+        headlines = [c.headline for c in multi_dev_items]
+        self.assertTrue(any("Glucometer Spikes Correlate with Sphygmomanometer" in h for h in headlines))
+        self.assertTrue(any("Pulse Oximeter & Sphygmomanometer" in h for h in headlines))
+        self.assertTrue(any("Digital Scale Weight Surge" in h for h in headlines))
+
+    def test_7d_vs_14d_trajectory_trend(self):
+        """Tests that 7-day vs 14-day rolling trajectory computes improvement or drift and outputs trend items."""
+        now = datetime.now(timezone.utc)
+        # 4 readings spanning 12 days, earlier average 144 mmHg, recent average 132 mmHg (improving)
+        bp_recs = [
+            {
+                "id": "bp_old1",
+                "recorded_at": (now - timedelta(days=12)).isoformat(),
+                "values": {"systolic": 146, "diastolic": 92, "pulse": 78},
+                "issues": []
+            },
+            {
+                "id": "bp_old2",
+                "recorded_at": (now - timedelta(days=10)).isoformat(),
+                "values": {"systolic": 142, "diastolic": 90, "pulse": 76},
+                "issues": []
+            },
+            {
+                "id": "bp_new1",
+                "recorded_at": (now - timedelta(days=4)).isoformat(),
+                "values": {"systolic": 134, "diastolic": 84, "pulse": 74},
+                "issues": []
+            },
+            {
+                "id": "bp_new2",
+                "recorded_at": (now - timedelta(days=1)).isoformat(),
+                "values": {"systolic": 130, "diastolic": 82, "pulse": 72},
+                "issues": []
+            }
+        ]
+        stats = preaggregate_health_data(bp_recs, [])
+        traj = stats.get("trajectory_7d_vs_14d")
+        self.assertIsNotNone(traj)
+        self.assertEqual(traj["prior_7d_avg_systolic"], 144.0)
+        self.assertEqual(traj["recent_7d_avg_systolic"], 132.0)
+        self.assertEqual(traj["delta_systolic"], -12.0)
+        self.assertEqual(traj["direction"], "improving")
+
+        resp = generate_heuristic_correlations("user_trend", stats)
+        trend_items = [c for c in resp.correlations if c.category == "longitudinal_trend"]
+        self.assertTrue(any("Systolic Improvement" in c.headline for c in trend_items))
+
+
 if __name__ == "__main__":
     unittest.main()
 

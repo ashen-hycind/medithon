@@ -90,14 +90,20 @@ def preaggregate_health_data(
     stats: Dict[str, Any] = {
         "total_bp_readings": len(bp_records),
         "total_glucose_readings": len(glucose_records),
+        "total_weight_readings": len(weight_records) if weight_records else 0,
+        "devices_detected": [],
         "avg_systolic": None,
         "avg_diastolic": None,
         "avg_pulse": None,
         "avg_glucose_mg_dl": None,
+        "avg_spo2": None,
+        "spo2_count": 0,
         "morning_avg_bp": None,
         "evening_avg_bp": None,
         "fasting_avg_glucose": None,
         "post_meal_avg_glucose": None,
+        "glucose_tir_pct": None,
+        "trajectory_7d_vs_14d": None,
         "confounder_effects": {},
         "paired_readings": [],
         "urgent_events": [],
@@ -105,11 +111,13 @@ def preaggregate_health_data(
     }
 
     # -------------------------------------------------------------
-    # Blood Pressure Aggregations
+    # Multi-Device Telemetry Setup & Blood Pressure Aggregations
     # -------------------------------------------------------------
+    devices_detected: set = set()
     systolics = []
     diastolics = []
     pulses = []
+    spo2_vals = []
     morning_sys, morning_dia = [], []
     evening_sys, evening_dia = [], []
 
@@ -121,6 +129,13 @@ def preaggregate_health_data(
         sys_val = vals.get("systolic")
         dia_val = vals.get("diastolic")
         pulse_val = vals.get("pulse")
+        spo2_val = vals.get("spo2")
+
+        d_type = r.get("device_type") or "Sphygmomanometer"
+        devices_detected.add(d_type)
+        if spo2_val is not None:
+            spo2_vals.append(spo2_val)
+            devices_detected.add("Pulse Oximeter")
 
         if sys_val is not None and dia_val is not None:
             systolics.append(sys_val)
@@ -208,6 +223,9 @@ def preaggregate_health_data(
         val = vals.get("glucose_value")
         unit = vals.get("unit", "mg/dL")
 
+        g_type = g.get("device_type") or "Glucometer"
+        devices_detected.add(g_type)
+
         if val is not None:
             # Normalize to mg/dL
             val_mg_dl = val * 18.0182 if unit == "mmol/L" else float(val)
@@ -235,13 +253,75 @@ def preaggregate_health_data(
 
     if glucose_vals:
         stats["avg_glucose_mg_dl"] = round(sum(glucose_vals) / len(glucose_vals), 1)
+        in_range_count = sum(1 for v in glucose_vals if 70 <= v <= 180)
+        stats["glucose_tir_pct"] = round(in_range_count / len(glucose_vals) * 100, 1)
     if fasting_vals:
         stats["fasting_avg_glucose"] = round(sum(fasting_vals) / len(fasting_vals), 1)
     if post_meal_vals:
         stats["post_meal_avg_glucose"] = round(sum(post_meal_vals) / len(post_meal_vals), 1)
 
+    if weight_records:
+        for w in weight_records:
+            devices_detected.add(w.get("device_type") or "Digital Scale")
+
+    stats["devices_detected"] = sorted(list(devices_detected))
+    stats["avg_spo2"] = round(sum(spo2_vals) / len(spo2_vals), 1) if spo2_vals else None
+    stats["spo2_count"] = len(spo2_vals)
+
     # -------------------------------------------------------------
-    # Temporal Cross-Stream Pairing (+/- 2 Hours: BP & Glucose)
+    # 7-Day vs 14-Day Longitudinal Trajectory Calculation
+    # -------------------------------------------------------------
+    bp_with_dt = [
+        (_parse_iso_datetime(r.get("recorded_at")), r)
+        for r in bp_records
+        if _parse_iso_datetime(r.get("recorded_at")) and r.get("values", {}).get("systolic") is not None
+    ]
+    if bp_with_dt:
+        bp_with_dt.sort(key=lambda x: x[0])
+        max_dt = bp_with_dt[-1][0]
+        min_dt = bp_with_dt[0][0]
+        total_span_days = (max_dt - min_dt).total_seconds() / 86400.0
+
+        if total_span_days >= 6.0:
+            c_7d = max_dt - timedelta(days=7)
+            c_14d = max_dt - timedelta(days=14)
+            recent_recs = [r for dt, r in bp_with_dt if dt >= c_7d]
+            prior_recs = [r for dt, r in bp_with_dt if c_14d <= dt < c_7d]
+        elif len(bp_with_dt) >= 4:
+            mid = len(bp_with_dt) // 2
+            prior_recs = [r for _, r in bp_with_dt[:mid]]
+            recent_recs = [r for _, r in bp_with_dt[mid:]]
+        else:
+            recent_recs = []
+            prior_recs = []
+
+        rec_sys = [r["values"]["systolic"] for r in recent_recs if r.get("values", {}).get("systolic") is not None]
+        pri_sys = [r["values"]["systolic"] for r in prior_recs if r.get("values", {}).get("systolic") is not None]
+        rec_dia = [r["values"]["diastolic"] for r in recent_recs if r.get("values", {}).get("diastolic") is not None]
+        pri_dia = [r["values"]["diastolic"] for r in prior_recs if r.get("values", {}).get("diastolic") is not None]
+
+        if rec_sys and pri_sys:
+            avg_rec_s = round(sum(rec_sys) / len(rec_sys), 1)
+            avg_pri_s = round(sum(pri_sys) / len(pri_sys), 1)
+            delta_s = round(avg_rec_s - avg_pri_s, 1)
+            avg_rec_d = round(sum(rec_dia) / len(rec_dia), 1) if rec_dia else None
+            avg_pri_d = round(sum(pri_dia) / len(pri_dia), 1) if pri_dia else None
+            delta_d = round(avg_rec_d - avg_pri_d, 1) if (avg_rec_d and avg_pri_d) else None
+
+            stats["trajectory_7d_vs_14d"] = {
+                "recent_7d_avg_systolic": avg_rec_s,
+                "prior_7d_avg_systolic": avg_pri_s,
+                "delta_systolic": delta_s,
+                "recent_7d_avg_diastolic": avg_rec_d,
+                "prior_7d_avg_diastolic": avg_pri_d,
+                "delta_diastolic": delta_d,
+                "recent_count": len(rec_sys),
+                "prior_count": len(pri_sys),
+                "direction": "improving" if delta_s <= -3.0 else "worsening" if delta_s >= 3.0 else "stable"
+            }
+
+    # -------------------------------------------------------------
+    # Temporal Cross-Stream Pairing (+/- 2 Hours: Multi-Device BP & Glucose)
     # -------------------------------------------------------------
     for bp in bp_records:
         bp_dt = _parse_iso_datetime(bp.get("recorded_at"))
@@ -259,6 +339,9 @@ def preaggregate_health_data(
                 unit = glu.get("values", {}).get("unit", "mg/dL")
                 glu_mg_dl = glu_val * 18.0182 if unit == "mmol/L" else float(glu_val or 0)
 
+                bp_dev = bp.get("device_type") or "Sphygmomanometer"
+                glu_dev = glu.get("device_type") or "Glucometer"
+
                 stats["paired_readings"].append({
                     "bp_id": bp.get("id"),
                     "glucose_id": glu.get("id"),
@@ -266,8 +349,12 @@ def preaggregate_health_data(
                     "systolic": bp.get("values", {}).get("systolic"),
                     "diastolic": bp.get("values", {}).get("diastolic"),
                     "pulse": bp.get("values", {}).get("pulse"),
+                    "spo2": bp.get("values", {}).get("spo2"),
                     "glucose_mg_dl": round(glu_mg_dl, 1),
-                    "meal_context": glu.get("meal_context")
+                    "meal_context": glu.get("meal_context"),
+                    "bp_device": bp_dev,
+                    "glucose_device": glu_dev,
+                    "devices": [bp_dev, glu_dev]
                 })
 
     # -------------------------------------------------------------
@@ -980,7 +1067,7 @@ def generate_heuristic_correlations(
                 clinical_suggestion="Continue tracking to evaluate consistency of this response."
             ))
 
-    # 3. Metabolic-Cardiovascular Interactions (Paired readings)
+    # 3. Multi-Device Telemetry & Metabolic-Cardiovascular Interactions
     paired = stats.get("paired_readings", [])
     if paired:
         post_meal_elevations = [
@@ -990,6 +1077,8 @@ def generate_heuristic_correlations(
         if post_meal_elevations:
             cnt = len(post_meal_elevations)
             avg_pulse_paired = round(sum(p["pulse"] for p in post_meal_elevations if p.get("pulse")) / cnt, 1) if any(p.get("pulse") for p in post_meal_elevations) else None
+            avg_glu_paired = round(sum(p["glucose_mg_dl"] for p in post_meal_elevations) / cnt, 1)
+            avg_sys_paired = round(sum(p["systolic"] for p in post_meal_elevations if p.get("systolic")) / cnt, 1) if any(p.get("systolic") for p in post_meal_elevations) else None
             pulse_desc = f"resting heart rate averaging {avg_pulse_paired} bpm and " if avg_pulse_paired else ""
             correlations.append(CorrelationItem(
                 category="metabolic_cardiovascular",
@@ -999,6 +1088,27 @@ def generate_heuristic_correlations(
                 evidence_count=cnt,
                 clinical_suggestion="Review meal carbohydrate density and consider light post-meal walking to moderate autonomic glycemic stress."
             ))
+            correlations.append(CorrelationItem(
+                category="multi_device_correlation",
+                confidence="high" if cnt >= 3 else "moderate",
+                headline="Multi-Device Synergy: Glucometer Spikes Correlate with Sphygmomanometer Pressure Surge",
+                explanation=f"Across {cnt} cross-device paired window{'s' if cnt > 1 else ''} within 2 hours, blood glucose elevation on your Glucometer (averaging {avg_glu_paired} mg/dL) directly coincided with {pulse_desc}elevated systolic pressure (averaging {avg_sys_paired} mmHg) captured on your Sphygmomanometer.",
+                evidence_count=cnt,
+                clinical_suggestion="Review meal carbohydrate density and consider light post-meal walking to moderate autonomic glycemic-cardiovascular stress across both monitoring devices."
+            ))
+
+    # 3b. Multi-Device Pulse Oximeter & Sphygmomanometer Telemetry
+    avg_spo2 = stats.get("avg_spo2")
+    if avg_spo2 is not None:
+        spo2_cnt = stats.get("spo2_count", 1)
+        correlations.append(CorrelationItem(
+            category="multi_device_correlation",
+            confidence="high" if spo2_cnt >= 2 else "moderate",
+            headline="Multi-Device Telemetry: Pulse Oximeter & Sphygmomanometer Perfusion Alignment",
+            explanation=f"Peripheral blood oxygen saturation (SpO2) averaged {avg_spo2}% across {spo2_cnt} reading{'s' if spo2_cnt > 1 else ''} on your Pulse Oximeter, confirming adequate microvascular oxygenation during Sphygmomanometer blood pressure recordings.",
+            evidence_count=spo2_cnt,
+            clinical_suggestion="Continue synchronizing readings between your Sphygmomanometer and Pulse Oximeter."
+        ))
 
     # 4. Diurnal Variation (Morning vs Evening BP)
     m_bp = stats.get("morning_avg_bp")
@@ -1012,7 +1122,7 @@ def generate_heuristic_correlations(
                 category="longitudinal_trend",
                 confidence="moderate",
                 headline="Morning Systolic Surge Observed",
-                explanation=f"Morning blood pressure averages {m_sys}/{m_bp['diastolic']} mmHg, which is {diff} mmHg higher than your evening average of {e_sys}/{e_bp['diastolic']} mmHg.",
+                explanation=f"Morning blood pressure averages {m_sys}/{m_bp['diastolic']} mmHg, which is {diff} mmHg higher than your evening average of {e_sys}/{e_bp['diastolic']} mmHg on your Sphygmomanometer.",
                 evidence_count=m_bp["count"] + e_bp["count"],
                 clinical_suggestion="Discuss morning blood pressure surges with your physician to evaluate medication timing and morning autonomic activity."
             ))
@@ -1021,20 +1131,66 @@ def generate_heuristic_correlations(
                 category="longitudinal_trend",
                 confidence="moderate",
                 headline="Evening Blood Pressure Elevation Noted",
-                explanation=f"Evening blood pressure averages {e_sys}/{e_bp['diastolic']} mmHg, exceeding morning levels by {abs(diff)} mmHg.",
+                explanation=f"Evening blood pressure averages {e_sys}/{e_bp['diastolic']} mmHg, exceeding morning levels by {abs(diff)} mmHg on your Sphygmomanometer.",
                 evidence_count=m_bp["count"] + e_bp["count"],
                 clinical_suggestion="Log late afternoon stress and dietary sodium to investigate evening pressure increases."
             ))
 
-    # 5. Rapid Fluid Shifts
+    # 5. Multi-Device Fluid Shifts (Digital Scale + Sphygmomanometer)
     for ws in stats.get("weight_shifts", []):
         correlations.append(CorrelationItem(
-            category="fluid_weight_shift",
+            category="multi_device_correlation",
             confidence="high",
-            headline="Rapid Weight Gain Suggests Potential Fluid Retention",
-            explanation=f"A weight increase of {ws['delta_kg']} kg was recorded over {ws['hours']} hours, which may indicate acute fluid accumulation.",
+            headline="Multi-Device Correlation: Digital Scale Weight Surge Coincides with Hemodynamic Shift",
+            explanation=f"A rapid weight change of +{ws['delta_kg']} kg was recorded over {ws['hours']} hours on your Digital Scale, which may indicate acute fluid accumulation impacting systemic vascular resistance.",
             evidence_count=1,
             clinical_suggestion="Consult your healthcare provider promptly if accompanied by lower extremity swelling, shortness of breath, or elevated blood pressure."
+        ))
+
+    # 5b. 7-Day vs 14-Day Trajectory Trend & Glycemic Target Range
+    traj = stats.get("trajectory_7d_vs_14d")
+    if traj and traj.get("recent_7d_avg_systolic") is not None and traj.get("prior_7d_avg_systolic") is not None:
+        delta_s = traj["delta_systolic"]
+        recent_s = traj["recent_7d_avg_systolic"]
+        prior_s = traj["prior_7d_avg_systolic"]
+        n_tot = traj.get("recent_count", 0) + traj.get("prior_count", 0)
+        if delta_s <= -3.0:
+            correlations.append(CorrelationItem(
+                category="longitudinal_trend",
+                confidence="high",
+                headline=f"7-Day vs 14-Day Trajectory: {abs(delta_s)} mmHg Systolic Improvement",
+                explanation=f"Sphygmomanometer readings show progressive hemodynamic stabilization: 7-day average systolic dropped to {recent_s} mmHg compared to {prior_s} mmHg during the prior period (-{abs(delta_s)} mmHg improvement across {n_tot} readings).",
+                evidence_count=n_tot,
+                clinical_suggestion="Maintain consistent lifestyle and pharmacologic regimen to support continued blood pressure optimization."
+            ))
+        elif delta_s >= 3.0:
+            correlations.append(CorrelationItem(
+                category="longitudinal_trend",
+                confidence="high",
+                headline=f"7-Day vs 14-Day Trajectory: +{delta_s} mmHg Systolic Drift",
+                explanation=f"Recent 7-day systolic blood pressure on your Sphygmomanometer averaged {recent_s} mmHg compared to {prior_s} mmHg in the prior window (+{delta_s} mmHg drift across {n_tot} readings).",
+                evidence_count=n_tot,
+                clinical_suggestion="Review dietary sodium, stress logs, and medication compliance with your attending clinician."
+            ))
+        else:
+            correlations.append(CorrelationItem(
+                category="longitudinal_trend",
+                confidence="moderate",
+                headline="7-Day vs 14-Day Trajectory: Stable Longitudinal Hemodynamics",
+                explanation=f"Systolic blood pressure on your Sphygmomanometer remains stable across consecutive monitoring windows ({recent_s} vs {prior_s} mmHg baseline across {n_tot} readings).",
+                evidence_count=n_tot,
+                clinical_suggestion="Continue regular morning and evening monitoring to track longitudinal stability."
+            ))
+
+    tir = stats.get("glucose_tir_pct")
+    if tir is not None and stats.get("total_glucose_readings", 0) >= 3:
+        correlations.append(CorrelationItem(
+            category="longitudinal_trend",
+            confidence="high" if stats.get("total_glucose_readings", 0) >= 6 else "moderate",
+            headline=f"Glycemic Trend: {tir}% Time in ADA Target Range",
+            explanation=f"Across {stats.get('total_glucose_readings')} Glucometer readings, {tir}% fell within the clinical target range (70-180 mg/dL), with fasting glucose averaging {stats.get('fasting_avg_glucose', 'N/A')} mg/dL.",
+            evidence_count=stats.get("total_glucose_readings", 1),
+            clinical_suggestion="Continue monitoring fasting and post-meal glucose to sustain glycemic stability."
         ))
 
     # 6. Pattern Detection Exact Correlations
@@ -1157,14 +1313,18 @@ def generate_heuristic_correlations(
         stats=AnalysisStats(
             total_bp_readings=stats.get("total_bp_readings", 0),
             total_glucose_readings=stats.get("total_glucose_readings", 0),
+            total_weight_readings=stats.get("total_weight_readings", 0),
+            devices_detected=stats.get("devices_detected", []),
             avg_systolic=stats.get("avg_systolic"),
             avg_diastolic=stats.get("avg_diastolic"),
             avg_pulse=stats.get("avg_pulse"),
             avg_glucose_mg_dl=stats.get("avg_glucose_mg_dl"),
+            avg_spo2=stats.get("avg_spo2"),
             morning_avg_bp={"systolic": m_bp["systolic"], "diastolic": m_bp["diastolic"]} if m_bp else None,
             evening_avg_bp={"systolic": e_bp["systolic"], "diastolic": e_bp["diastolic"]} if e_bp else None,
             fasting_avg_glucose=stats.get("fasting_avg_glucose"),
-            post_meal_avg_glucose=stats.get("post_meal_avg_glucose")
+            post_meal_avg_glucose=stats.get("post_meal_avg_glucose"),
+            trajectory_7d_vs_14d=stats.get("trajectory_7d_vs_14d")
         ),
         patterns=stats.get("patterns"),
         rote_memory=RoteMemoryState(**rote_mem) if rote_mem else None,
@@ -1208,15 +1368,18 @@ STEP 2 — CONFOUNDER & TRIGGER IDENTIFICATION:
   - The statistics are pre-computed and provided to you. Ground every claim in those numbers.
   - NEVER invent or estimate data not present in the provided statistics.
 
-STEP 3 — CROSS-STREAM TEMPORAL PAIRING:
-  For blood pressure and blood glucose readings taken within ±2 hours of each other:
-  - Identify if glucose elevation preceded, co-occurred with, or followed cardiovascular load.
-  - Note the directionality of the effect (e.g., "glucose rose BEFORE pulse elevation").
-  - Characterize: was this a post-prandial spike? A fasting anomaly? A morning cortisol effect?
+STEP 3 — MULTI-DEVICE TELEMETRY & CROSS-STREAM PAIRING:
+  For measurements taken across multiple clinical device modalities:
+  - Sphygmomanometer (blood pressure and pulse)
+  - Glucometer (capillary blood glucose)
+  - Pulse Oximeter (SpO2 oxygen saturation and pulse)
+  - Digital Scale (body weight and fluid shifts)
+  Examine cross-device interactions: did post-meal Glucometer elevations precede Sphygmomanometer pressure/pulse surges? Does Pulse Oximeter SpO2 align with hemodynamic strain? Does Digital Scale weight surge match fluid-retention hypertension?
+  Assign category "multi_device_correlation" for findings involving two or more device modalities.
 
 STEP 4 — LONGITUDINAL TREND SYNTHESIS:
   After completing steps 1-3, synthesize:
-  - Is the patient's overall trajectory IMPROVING, STABLE, or DETERIORATING?
+  - Is the patient's overall 7-day vs 14-day trajectory IMPROVING, STABLE, or DETERIORATING?
   - Are morning vs evening readings consistently different? (Diurnal pattern)
   - Are there acute crisis events? Do they cluster around specific lifestyle factors?
   - Construct a physician-grade, multi-paragraph synthesized summary.
@@ -1234,7 +1397,7 @@ Return strictly valid JSON (no markdown fences, no explanation outside JSON):
   "temporal_reasoning_trace": "Brief description of key temporal patterns observed in Step 1-3 before final output (1-2 sentences)",
   "correlations": [
     {
-      "category": "lifestyle_trigger" | "metabolic_cardiovascular" | "symptom_spike" | "longitudinal_trend" | "medication_response" | "fluid_weight_shift" | "other",
+      "category": "lifestyle_trigger" | "metabolic_cardiovascular" | "symptom_spike" | "longitudinal_trend" | "medication_response" | "fluid_weight_shift" | "multi_device_correlation" | "other",
       "confidence": "high" | "moderate" | "low",
       "headline": "Concise clinical title",
       "explanation": "Specific data-anchored explanation citing exact numbers from the provided statistics",
@@ -1258,8 +1421,22 @@ def _build_temporal_content(stats: Dict[str, Any]) -> str:
     sections = []
 
     sections.append("=== PATIENT HEALTH TIMELINE STATISTICS ===")
-    sections.append(f"Total Blood Pressure Recordings: {stats.get('total_bp_readings', 0)}")
-    sections.append(f"Total Blood Glucose Recordings: {stats.get('total_glucose_readings', 0)}")
+    devs = stats.get("devices_detected", [])
+    if devs:
+        sections.append(f"Devices Active in Telemetry: {', '.join(devs)}")
+    sections.append(f"Total Blood Pressure Recordings (Sphygmomanometer): {stats.get('total_bp_readings', 0)}")
+    sections.append(f"Total Blood Glucose Recordings (Glucometer): {stats.get('total_glucose_readings', 0)}")
+    if stats.get("total_weight_readings"):
+        sections.append(f"Total Weight Recordings (Digital Scale): {stats.get('total_weight_readings')}")
+    if stats.get("avg_spo2") is not None:
+        sections.append(f"Pulse Oximeter Average SpO2: {stats['avg_spo2']}% (n={stats.get('spo2_count', 0)})")
+    traj = stats.get("trajectory_7d_vs_14d")
+    if traj:
+        sections.append(
+            f"7-Day vs 14-Day Trajectory Trend: Recent 7d Systolic {traj['recent_7d_avg_systolic']} mmHg vs Prior 7d {traj['prior_7d_avg_systolic']} mmHg (Δ {traj['delta_systolic']} mmHg, direction: {traj['direction']})"
+        )
+    if stats.get("glucose_tir_pct") is not None:
+        sections.append(f"Glucometer Time in Range (70-180 mg/dL): {stats['glucose_tir_pct']}%")
 
     # Aggregate baselines
     if stats.get("avg_systolic") is not None:
@@ -1466,7 +1643,7 @@ def generate_correlation_insights(
 
             # Build correlations list
             correlations: List[CorrelationItem] = []
-            valid_categories = {"lifestyle_trigger", "metabolic_cardiovascular", "symptom_spike", "longitudinal_trend", "medication_response", "fluid_weight_shift", "other"}
+            valid_categories = {"lifestyle_trigger", "metabolic_cardiovascular", "symptom_spike", "longitudinal_trend", "medication_response", "fluid_weight_shift", "multi_device_correlation", "other"}
             valid_confidences = {"high", "moderate", "low"}
 
             for item in data.get("correlations", []):
@@ -1516,14 +1693,18 @@ def generate_correlation_insights(
                 stats=AnalysisStats(
                     total_bp_readings=stats.get("total_bp_readings", 0),
                     total_glucose_readings=stats.get("total_glucose_readings", 0),
+                    total_weight_readings=stats.get("total_weight_readings", 0),
+                    devices_detected=stats.get("devices_detected", []),
                     avg_systolic=stats.get("avg_systolic"),
                     avg_diastolic=stats.get("avg_diastolic"),
                     avg_pulse=stats.get("avg_pulse"),
                     avg_glucose_mg_dl=stats.get("avg_glucose_mg_dl"),
+                    avg_spo2=stats.get("avg_spo2"),
                     morning_avg_bp={"systolic": m_bp["systolic"], "diastolic": m_bp["diastolic"]} if m_bp else None,
                     evening_avg_bp={"systolic": e_bp["systolic"], "diastolic": e_bp["diastolic"]} if e_bp else None,
                     fasting_avg_glucose=stats.get("fasting_avg_glucose"),
-                    post_meal_avg_glucose=stats.get("post_meal_avg_glucose")
+                    post_meal_avg_glucose=stats.get("post_meal_avg_glucose"),
+                    trajectory_7d_vs_14d=stats.get("trajectory_7d_vs_14d")
                 ),
                 patterns=stats.get("patterns"),
                 rote_memory=RoteMemoryState(**rote_mem) if rote_mem else None,

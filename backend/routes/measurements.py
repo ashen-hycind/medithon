@@ -96,7 +96,7 @@ async def create_blood_pressure_measurement(
         "measurement_type": "blood_pressure",
         "recorded_at": recorded_at,
         "values": data.values.model_dump(),
-        "units": {"systolic": "mmHg", "diastolic": "mmHg", "pulse": "bpm"},
+        "units": {"systolic": "mmHg", "diastolic": "mmHg", "pulse": "bpm", "spo2": "%"},
         "clinical_stage": clinical_stage,
         "has_red_flags": has_red_flags,
         "safety_alerts": safety_alerts,
@@ -105,6 +105,7 @@ async def create_blood_pressure_measurement(
         "source": data.source,
         "scan_id": data.scan_id,
         "device_model": data.device_model,
+        "device_type": data.device_type or "Sphygmomanometer",
         "created_at": now_iso,
         "updated_at": now_iso
     }
@@ -191,6 +192,7 @@ async def create_blood_glucose_measurement(
         "source": data.source,
         "scan_id": data.scan_id,
         "device_model": data.device_model,
+        "device_type": data.device_type or "Glucometer",
         "created_at": now_iso,
         "updated_at": now_iso
     }

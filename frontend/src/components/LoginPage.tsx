@@ -1,4 +1,4 @@
-﻿import React, { useState } from 'react';
+import React, { useState } from 'react';
 import { 
   signInWithPopup, 
   signInWithEmailAndPassword, 
@@ -56,8 +56,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onBack, onNavigateRegister
   };
 
   const fillQuickDemo = () => {
-    setEmail('madhav.sharma@medibridge.health');
-    setPassword('demoPassword123');
+    setEmail('demo@user.com');
+    setPassword('abc123');
   };
 
   return (
