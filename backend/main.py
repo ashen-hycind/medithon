@@ -11,6 +11,7 @@ load_dotenv(override=True)
 from routes.users import router as users_router
 from routes.measurements import router as measurements_router
 from routes.analysis import router as analysis_router
+from routes.reports import router as reports_router
 from firebase_config import init_firebase
 
 app = FastAPI(
@@ -44,6 +45,7 @@ async def health_check():
 app.include_router(users_router)
 app.include_router(measurements_router)
 app.include_router(analysis_router)
+app.include_router(reports_router)
 
 
 if __name__ == "__main__":

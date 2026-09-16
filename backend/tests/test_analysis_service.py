@@ -934,10 +934,49 @@ class TestMultiDeviceAndTrendAnalysis(unittest.TestCase):
 
         resp = generate_heuristic_correlations("user_trend", stats)
         trend_items = [c for c in resp.correlations if c.category == "longitudinal_trend"]
-        self.assertTrue(any("Systolic Improvement" in c.headline for c in trend_items))
+        self.assertTrue(any("Systolic Improvement" in c.headline or "Blood Pressure Trend" in c.headline for c in trend_items))
+
+    def test_dynamic_modality_trends_and_insight_selection(self):
+        """Tests dynamic time periods, calculated values without mock data, and prioritized distinct tabs."""
+        now = datetime.now(timezone.utc)
+        bp_recs = [
+            {"id": "bp1", "recorded_at": (now - timedelta(days=14)).isoformat(), "values": {"systolic": 142, "diastolic": 90, "pulse": 75, "spo2": 97}},
+            {"id": "bp2", "recorded_at": (now - timedelta(days=7)).isoformat(), "values": {"systolic": 136, "diastolic": 86, "pulse": 72, "spo2": 98}},
+            {"id": "bp3", "recorded_at": (now - timedelta(days=1)).isoformat(), "values": {"systolic": 130, "diastolic": 82, "pulse": 70, "spo2": 99}},
+        ]
+        glu_recs = [
+            {"id": "g1", "recorded_at": (now - timedelta(days=14)).isoformat(), "values": {"glucose_value": 105.0, "unit": "mg/dL"}, "meal_context": "fasting"},
+            {"id": "g2", "recorded_at": (now - timedelta(days=2)).isoformat(), "values": {"glucose_value": 95.0, "unit": "mg/dL"}, "meal_context": "fasting"},
+        ]
+        weight_recs = [
+            {"recorded_at": (now - timedelta(days=14)).isoformat(), "weight_kg": 78.0},
+            {"recorded_at": (now - timedelta(days=1)).isoformat(), "weight_kg": 79.5},
+        ]
+        stats = preaggregate_health_data(bp_recs, glu_recs, weight_recs)
+
+        # Dynamic trends must exist and contain actual numbers
+        self.assertIn("dynamic_trends", stats)
+        bp_t = stats["dynamic_trends"]["blood_pressure"]
+        self.assertEqual(bp_t["period_label"], "14-Day")
+        self.assertEqual(bp_t["avg_systolic"], 136.0)
+        self.assertIn("136.0 mmHg", bp_t["explanation"])
+
+        w_t = stats["dynamic_trends"]["weight"]
+        self.assertEqual(w_t["delta_kg"], 1.5)
+        self.assertIn("1.5 kg", w_t["explanation"])
+
+        # Correlations must prioritize distinct discovered modalities in top 3 slots
+        resp = generate_heuristic_correlations("user_multi", stats)
+        self.assertGreaterEqual(len(resp.correlations), 3)
+        headlines = [c.headline for c in resp.correlations[:3]]
+        # Insight 1: Blood Pressure Trend
+        self.assertTrue(any("Blood Pressure Trend" in h for h in headlines))
+        # Insight 2: Weight or Oxygen or Glucose Trend
+        self.assertTrue(any("Weight Trend" in h or "Oxygen" in h or "Glucose" in h for h in headlines))
 
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

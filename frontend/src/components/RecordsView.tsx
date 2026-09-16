@@ -426,7 +426,7 @@ export const RecordsView: React.FC<RecordsViewProps> = ({
           {activeTab === 'glucose' && (
             <button
               onClick={() => onOpenScan('blood_glucose')}
-              className="px-4 py-2.5 bg-teal-700 hover:bg-teal-800 text-white text-xs font-bold rounded-xl shadow-sm transition flex items-center gap-2"
+              className="px-4 py-2.5 bg-[#1b5879] hover:bg-[#14425b] text-white text-xs font-bold rounded-xl shadow-sm transition flex items-center gap-2"
             >
               <Camera className="w-4 h-4" />
               <span>Scan Glucometer</span>
@@ -1054,7 +1054,7 @@ export const RecordsView: React.FC<RecordsViewProps> = ({
                 <div className="pt-2">
                   <button
                     onClick={() => onOpenScan('blood_glucose')}
-                    className="px-5 py-2.5 bg-teal-700 hover:bg-teal-800 text-white text-xs font-bold rounded-xl shadow-sm transition flex items-center gap-2 mx-auto"
+                    className="px-5 py-2.5 bg-[#1b5879] hover:bg-[#14425b] text-white text-xs font-bold rounded-xl shadow-sm transition flex items-center gap-2 mx-auto"
                   >
                     <Camera className="w-4 h-4" />
                     <span>Scan Glucometer Now</span>

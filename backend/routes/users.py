@@ -140,6 +140,13 @@ async def update_weight(weight_data: WeightUpdate, current_user: dict = Depends(
         "source": "manual_update"
     })
 
+    # Immediately recalculate AI health analysis upon saving weight entity
+    try:
+        from services.analysis_service import get_or_compute_analysis
+        get_or_compute_analysis(user_id=uid, db=db, force_refresh=True)
+    except Exception as ai_err:
+        print(f"[UsersRoute] Warning: Immediate AI re-run on weight error: {ai_err}")
+
     return {"status": "success", "weight_kg": weight_data.weight_kg, "recorded_at": timestamp}
 
 @router.get("/weight/history", status_code=status.HTTP_200_OK)

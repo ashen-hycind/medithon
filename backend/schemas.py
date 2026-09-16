@@ -106,6 +106,16 @@ class BloodGlucoseValues(BaseModel):
                 raise ValueError(f"Glucose value {self.glucose_value} mmol/L is outside valid physiological bounds (0.5 - 40.0 mmol/L).")
         return self
 
+class SpO2Values(BaseModel):
+    spo2: int = Field(..., ge=50, le=100, description="Peripheral blood oxygen saturation percentage (50-100%)")
+    pulse: Optional[int] = Field(None, ge=30, le=250, description="Pulse rate in bpm")
+
+WeightUnit = Literal["kg", "lb"]
+
+class WeightValues(BaseModel):
+    weight: float = Field(..., ge=2.0, le=500.0, description="Weight measurement value")
+    unit: WeightUnit = Field(default="kg", description="Unit of weight (kg or lb)")
+
 class ImageQualityReport(BaseModel):
     is_readable: bool = True
     glare_detected: bool = False
@@ -114,9 +124,9 @@ class ImageQualityReport(BaseModel):
 
 class ScanExtractionResponse(BaseModel):
     scan_id: str
-    detected_type: Literal["blood_pressure", "blood_glucose", "unknown"] = "blood_pressure"
-    device_name: Optional[str] = Field(None, description="e.g. Omron HEM-7120, Accu-Chek Guide")
-    values: Union[BloodPressureValues, BloodGlucoseValues, Dict[str, Any]]
+    detected_type: Literal["blood_pressure", "pulse_oximeter", "blood_glucose", "weight", "unknown"] = "blood_pressure"
+    device_name: Optional[str] = Field(None, description="e.g. Omron HEM-7120, Accu-Chek Guide, Wellue O2, Withings Scale")
+    values: Union[BloodPressureValues, BloodGlucoseValues, SpO2Values, WeightValues, Dict[str, Any]]
     confidence: float = Field(..., ge=0.0, le=1.0)
     quality: ImageQualityReport
     raw_detected_text: Optional[str] = None
@@ -187,6 +197,70 @@ class BloodGlucoseMeasurementResponse(BaseModel):
     created_at: str
     updated_at: str
 
+class SpO2MeasurementCreate(BaseModel):
+    recorded_at: Optional[str] = Field(None, description="ISO 8601 timestamp of measurement")
+    values: SpO2Values
+    raw_user_notes: Optional[str] = Field(None, description="Unfiltered user notes")
+    issues: list[ExtractedIssue] = Field(default_factory=list)
+    source: Literal["camera", "screenshot", "manual"] = "camera"
+    scan_id: Optional[str] = None
+    device_model: Optional[str] = None
+    device_type: Optional[str] = Field(default="Pulse Oximeter", description="Device modality e.g. Pulse Oximeter")
+
+class SpO2MeasurementResponse(BaseModel):
+    id: str
+    user_id: str
+    recorded_at: str
+    values: SpO2Values
+    units: dict[str, str] = Field(default_factory=lambda: {"spo2": "%", "pulse": "bpm"})
+    clinical_stage: str = "Normal" # "Normal", "Mild Hypoxemia", "Severe Hypoxemia"
+    has_red_flags: bool = False
+    safety_alerts: list[str] = Field(default_factory=list)
+    raw_user_notes: Optional[str] = None
+    issues: list[ExtractedIssue] = Field(default_factory=list)
+    source: str
+    scan_id: Optional[str] = None
+    device_model: Optional[str] = None
+    device_type: Optional[str] = "Pulse Oximeter"
+    created_at: str
+    updated_at: str
+
+class WeightMeasurementCreate(BaseModel):
+    recorded_at: Optional[str] = Field(None, description="ISO 8601 timestamp of measurement")
+    values: WeightValues
+    raw_user_notes: Optional[str] = Field(None, description="Unfiltered user notes")
+    issues: list[ExtractedIssue] = Field(default_factory=list)
+    source: Literal["camera", "screenshot", "manual"] = "camera"
+    scan_id: Optional[str] = None
+    device_model: Optional[str] = None
+    device_type: Optional[str] = Field(default="Digital Scale", description="Device modality e.g. Digital Scale")
+
+class WeightMeasurementResponse(BaseModel):
+    id: str
+    user_id: str
+    recorded_at: str
+    values: WeightValues
+    weight_kg: float
+    units: dict[str, str] = Field(default_factory=lambda: {"weight": "kg"})
+    clinical_stage: str = "Recorded"
+    has_red_flags: bool = False
+    safety_alerts: list[str] = Field(default_factory=list)
+    raw_user_notes: Optional[str] = None
+    issues: list[ExtractedIssue] = Field(default_factory=list)
+    source: str
+    scan_id: Optional[str] = None
+    device_model: Optional[str] = None
+    device_type: Optional[str] = "Digital Scale"
+    created_at: str
+    updated_at: str
+
+class HealthReading(BaseModel):
+    type: Literal["blood_pressure", "spo2", "blood_glucose", "weight"]
+    timestamp: str
+    values: Dict[str, Any]
+    unit: str
+    source: str = "ocr"
+
 
 # =====================================================================
 # AI Clinical Correlation Schemas
@@ -228,6 +302,7 @@ class AnalysisStats(BaseModel):
     fasting_avg_glucose: Optional[float] = None
     post_meal_avg_glucose: Optional[float] = None
     trajectory_7d_vs_14d: Optional[dict[str, Any]] = None
+    dynamic_trends: Optional[dict[str, Any]] = None
 
 class RoteMemoryState(BaseModel):
     session_resumed: bool = False

@@ -55,6 +55,16 @@ export interface BloodGlucoseValues {
   meal_context?: MealContext | null;
 }
 
+export interface SpO2Values {
+  spo2: number;
+  pulse?: number | null;
+}
+
+export interface WeightValues {
+  weight: number;
+  unit: 'kg' | 'lb';
+}
+
 export interface ImageQualityReport {
   is_readable: boolean;
   glare_detected: boolean;
@@ -64,9 +74,9 @@ export interface ImageQualityReport {
 
 export interface ScanExtractionResponse {
   scan_id: string;
-  detected_type: 'blood_pressure' | 'blood_glucose' | string;
+  detected_type: 'blood_pressure' | 'pulse_oximeter' | 'blood_glucose' | 'weight' | string;
   device_name?: string | null;
-  values: BloodPressureValues | BloodGlucoseValues | any;
+  values: BloodPressureValues | BloodGlucoseValues | SpO2Values | WeightValues | any;
   confidence: number;
   quality: ImageQualityReport;
   raw_detected_text?: string | null;
@@ -141,6 +151,47 @@ export interface BloodGlucoseMeasurement {
   updated_at: string;
 }
 
+export interface SpO2MeasurementCreate {
+  recorded_at?: string;
+  values: SpO2Values;
+  raw_user_notes?: string | null;
+  issues: ExtractedIssue[];
+  source?: 'camera' | 'screenshot' | 'manual';
+  scan_id?: string;
+  device_model?: string | null;
+  device_type?: string | null;
+}
+
+export interface SpO2Measurement {
+  id: string;
+  user_id: string;
+  recorded_at: string;
+  values: SpO2Values;
+  units: { spo2: string; pulse: string };
+  clinical_stage: string;
+  has_red_flags: boolean;
+  safety_alerts: string[];
+  raw_user_notes?: string | null;
+  issues: ExtractedIssue[];
+  source: string;
+  scan_id?: string;
+  device_model?: string | null;
+  device_type?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WeightMeasurementCreate {
+  recorded_at?: string;
+  values: WeightValues;
+  raw_user_notes?: string | null;
+  issues: ExtractedIssue[];
+  source?: 'camera' | 'screenshot' | 'manual';
+  scan_id?: string;
+  device_model?: string | null;
+  device_type?: string | null;
+}
+
 export type CorrelationCategory =
   | 'lifestyle_trigger'
   | 'metabolic_cardiovascular'
@@ -177,6 +228,7 @@ export interface AnalysisStats {
   fasting_avg_glucose?: number | null;
   post_meal_avg_glucose?: number | null;
   trajectory_7d_vs_14d?: any;
+  dynamic_trends?: Record<string, any> | null;
 }
 
 export interface RoteMemoryState {

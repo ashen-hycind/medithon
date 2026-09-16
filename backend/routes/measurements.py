@@ -10,13 +10,18 @@ from schemas import (
     BloodPressureMeasurementCreate,
     BloodPressureMeasurementResponse,
     BloodGlucoseMeasurementCreate,
-    BloodGlucoseMeasurementResponse
+    BloodGlucoseMeasurementResponse,
+    SpO2MeasurementCreate,
+    SpO2MeasurementResponse,
+    WeightMeasurementCreate,
+    WeightMeasurementResponse
 )
 from security import get_current_user
 from firebase_config import get_firestore_db
 from services.gemini_service import extract_issues_from_text
 from services.vision_service import detect_and_extract_measurement
 from services.clinical_service import evaluate_clinical_alerts, evaluate_glucose_alerts
+from services.analysis_service import get_or_compute_analysis
 
 router = APIRouter(prefix="/api", tags=["measurements"])
 
@@ -113,6 +118,12 @@ async def create_blood_pressure_measurement(
     doc_ref = db.collection("profiles").document(uid).collection("measurements").document(measurement_id)
     doc_ref.set(record)
 
+    # Immediately recalculate AI health analysis upon saving a new entity
+    try:
+        get_or_compute_analysis(user_id=uid, db=db, force_refresh=True)
+    except Exception as ai_err:
+        print(f"[MeasurementsRoute] Warning: Background AI re-run error: {ai_err}")
+
     return BloodPressureMeasurementResponse(**record)
 
 @router.get("/measurements/blood-pressure", response_model=List[BloodPressureMeasurementResponse])
@@ -200,6 +211,12 @@ async def create_blood_glucose_measurement(
     doc_ref = db.collection("profiles").document(uid).collection("measurements").document(measurement_id)
     doc_ref.set(record)
 
+    # Immediately recalculate AI health analysis upon saving a new entity
+    try:
+        get_or_compute_analysis(user_id=uid, db=db, force_refresh=True)
+    except Exception as ai_err:
+        print(f"[MeasurementsRoute] Warning: Background AI re-run error: {ai_err}")
+
     return BloodGlucoseMeasurementResponse(**record)
 
 
@@ -238,4 +255,194 @@ async def list_blood_glucose_measurements(
         results = [BloodGlucoseMeasurementResponse(**doc.to_dict()) for doc in fallback_docs]
         results.sort(key=lambda x: x.recorded_at, reverse=True)
         return results
+
+
+@router.post("/measurements/spo2", response_model=SpO2MeasurementResponse, status_code=status.HTTP_201_CREATED)
+async def create_spo2_measurement(
+    data: SpO2MeasurementCreate,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Persists a verified or manually entered Pulse Oximeter SpO2 & Pulse measurement.
+    Stored under profiles/{uid}/measurements/{id}.
+    """
+    db = get_firestore_db()
+    if db is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Firestore database is not connected."
+        )
+
+    uid = current_user["uid"]
+    now_iso = datetime.now(timezone.utc).isoformat()
+    recorded_at = data.recorded_at or now_iso
+    measurement_id = f"spo2_{uuid.uuid4().hex[:12]}"
+
+    spo2_val = data.values.spo2
+    alerts = []
+    clinical_stage = "Normal"
+    has_red_flags = False
+
+    if spo2_val < 85:
+        clinical_stage = "Severe Hypoxemia"
+        alerts.append(f"Critical oxygen desaturation ({spo2_val}%). Seek medical attention.")
+        has_red_flags = True
+    elif spo2_val < 95:
+        clinical_stage = "Mild Hypoxemia"
+        alerts.append(f"Sub-optimal oxygen saturation ({spo2_val}%). Clinical benchmark is 95-100%.")
+
+    record = {
+        "id": measurement_id,
+        "user_id": uid,
+        "measurement_type": "spo2",
+        "recorded_at": recorded_at,
+        "values": data.values.model_dump(),
+        "units": {"spo2": "%", "pulse": "bpm"},
+        "clinical_stage": clinical_stage,
+        "has_red_flags": has_red_flags,
+        "safety_alerts": alerts,
+        "raw_user_notes": data.raw_user_notes,
+        "issues": [issue.model_dump() for issue in data.issues],
+        "source": data.source,
+        "scan_id": data.scan_id,
+        "device_model": data.device_model,
+        "device_type": data.device_type or "Pulse Oximeter",
+        "created_at": now_iso,
+        "updated_at": now_iso
+    }
+
+    doc_ref = db.collection("profiles").document(uid).collection("measurements").document(measurement_id)
+    doc_ref.set(record)
+
+    # Immediately recalculate AI health analysis upon saving a new entity
+    try:
+        get_or_compute_analysis(user_id=uid, db=db, force_refresh=True)
+    except Exception as ai_err:
+        print(f"[MeasurementsRoute] Warning: Background AI re-run error: {ai_err}")
+
+    return SpO2MeasurementResponse(**record)
+
+
+@router.get("/measurements/spo2", response_model=List[SpO2MeasurementResponse])
+async def list_spo2_measurements(
+    limit: int = 50,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Retrieves the longitudinal history of SpO2 / Pulse Oximeter measurements for the authenticated user.
+    """
+    db = get_firestore_db()
+    if db is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Firestore database is not connected."
+        )
+
+    uid = current_user["uid"]
+    measurements_ref = db.collection("profiles").document(uid).collection("measurements")
+
+    try:
+        docs = measurements_ref.where("measurement_type", "==", "spo2").limit(limit).stream()
+        results = [SpO2MeasurementResponse(**doc.to_dict()) for doc in docs]
+        results.sort(key=lambda x: x.recorded_at, reverse=True)
+        return results
+    except Exception:
+        return []
+
+
+@router.post("/measurements/weight", response_model=WeightMeasurementResponse, status_code=status.HTTP_201_CREATED)
+async def create_weight_measurement(
+    data: WeightMeasurementCreate,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Persists a verified or manually entered digital scale weight measurement.
+    Stored under profiles/{uid}/measurements/{id} and updates weight_history.
+    """
+    db = get_firestore_db()
+    if db is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Firestore database is not connected."
+        )
+
+    uid = current_user["uid"]
+    now_iso = datetime.now(timezone.utc).isoformat()
+    recorded_at = data.recorded_at or now_iso
+    measurement_id = f"w_{uuid.uuid4().hex[:12]}"
+
+    # Normalize to kg
+    weight_kg = data.values.weight if data.values.unit == "kg" else round(data.values.weight * 0.45359237, 2)
+
+    record = {
+        "id": measurement_id,
+        "user_id": uid,
+        "measurement_type": "weight",
+        "recorded_at": recorded_at,
+        "values": data.values.model_dump(),
+        "weight_kg": weight_kg,
+        "units": {"weight": "kg"},
+        "clinical_stage": "Recorded",
+        "has_red_flags": False,
+        "safety_alerts": [],
+        "raw_user_notes": data.raw_user_notes,
+        "issues": [issue.model_dump() for issue in data.issues],
+        "source": data.source,
+        "scan_id": data.scan_id,
+        "device_model": data.device_model,
+        "device_type": data.device_type or "Digital Scale",
+        "created_at": now_iso,
+        "updated_at": now_iso
+    }
+
+    doc_ref = db.collection("profiles").document(uid).collection("measurements").document(measurement_id)
+    doc_ref.set(record)
+
+    # Sync with profile weight & weight_history
+    profile_ref = db.collection("profiles").document(uid)
+    profile_ref.update({
+        "weight_kg": weight_kg,
+        "updated_at": recorded_at
+    })
+    profile_ref.collection("weight_history").add({
+        "weight_kg": weight_kg,
+        "recorded_at": recorded_at,
+        "source": data.source,
+        "device_type": data.device_type or "Digital Scale"
+    })
+
+    # Immediately recalculate AI health analysis upon saving a new entity
+    try:
+        get_or_compute_analysis(user_id=uid, db=db, force_refresh=True)
+    except Exception as ai_err:
+        print(f"[MeasurementsRoute] Warning: Background AI re-run error: {ai_err}")
+
+    return WeightMeasurementResponse(**record)
+
+
+@router.get("/measurements/weight", response_model=List[WeightMeasurementResponse])
+async def list_weight_measurements(
+    limit: int = 50,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Retrieves the longitudinal history of weight measurements for the authenticated user.
+    """
+    db = get_firestore_db()
+    if db is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Firestore database is not connected."
+        )
+
+    uid = current_user["uid"]
+    measurements_ref = db.collection("profiles").document(uid).collection("measurements")
+
+    try:
+        docs = measurements_ref.where("measurement_type", "==", "weight").limit(limit).stream()
+        results = [WeightMeasurementResponse(**doc.to_dict()) for doc in docs]
+        results.sort(key=lambda x: x.recorded_at, reverse=True)
+        return results
+    except Exception:
+        return []
 

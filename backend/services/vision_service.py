@@ -29,6 +29,8 @@ from schemas import (
     ScanExtractionResponse,
     BloodPressureValues,
     BloodGlucoseValues,
+    SpO2Values,
+    WeightValues,
     ImageQualityReport
 )
 
@@ -76,6 +78,13 @@ Your objectives:
       - unit: "mg/dL" or "mmol/L". Look for text label on screen. If not visible: values >= 35 are "mg/dL", values < 35 with or without decimals are "mmol/L".
       - meal_context: "fasting", "before_meal", "after_meal", "bedtime", or null if not indicated by screen icons (e.g. apple icon).
 
+   C. For Pulse Oximeters:
+      - spo2: blood oxygen saturation percentage % (50 - 100)
+      - pulse: pulse rate in bpm (30 - 250) or null if not indicated
+   D. For Digital Weight Scales:
+      - weight: numerical reading (e.g. 78.5, 172.4)
+      - unit: "kg" or "lb" (default "kg" if not specified)
+
 3. IMAGE QUALITY & DIAGNOSTICS:
    - is_readable: true if primary measurement digits can be deciphered with high certainty.
    - glare_detected: true if flash, specular glare, or reflection obscures display digits.
@@ -89,10 +98,10 @@ Your objectives:
    - 0.00 to 0.39: Unreadable or not a medical device.
 
 5. DEVICE METADATA & OCR TEXT:
-   - device_name: Brand/model (e.g. "Omron HEM-7120", "Accu-Chek Guide", "OneTouch Verio", "Contour Next"). If not visible, return null.
+   - device_name: Brand/model (e.g. "Omron HEM-7120", "Accu-Chek Guide", "Wellue FS20D", "Withings Body"). If not visible, return null.
    - raw_detected_text: Exact sequence of text/numbers read from the screen.
 
-Return strictly a single valid JSON object matching either schema:
+Return strictly a single valid JSON object matching one of these schemas:
 
 For Blood Pressure:
 {
@@ -113,6 +122,24 @@ For Blood Pressure:
   "raw_detected_text": "SYS 128 DIA 82 PUL 74"
 }
 
+For Pulse Oximeter:
+{
+  "detected_type": "pulse_oximeter",
+  "device_name": "Fingertip Pulse Oximeter",
+  "confidence": 0.96,
+  "values": {
+    "spo2": 98,
+    "pulse": 72
+  },
+  "quality": {
+    "is_readable": true,
+    "glare_detected": false,
+    "display_cut_off": false,
+    "issues": []
+  },
+  "raw_detected_text": "%SpO2 98 PR bpm 72"
+}
+
 For Blood Glucose:
 {
   "detected_type": "blood_glucose",
@@ -130,6 +157,24 @@ For Blood Glucose:
     "issues": []
   },
   "raw_detected_text": "104 mg/dL"
+}
+
+For Weight Scale:
+{
+  "detected_type": "weight",
+  "device_name": "Digital Scale",
+  "confidence": 0.95,
+  "values": {
+    "weight": 78.5,
+    "unit": "kg"
+  },
+  "quality": {
+    "is_readable": true,
+    "glare_detected": false,
+    "display_cut_off": false,
+    "issues": []
+  },
+  "raw_detected_text": "78.5 kg"
 }
 """
 
@@ -360,13 +405,163 @@ def parse_glucose_response(data: Dict[str, Any], scan_id: str) -> ScanExtraction
     )
 
 
+def parse_oximeter_response(data: Dict[str, Any], scan_id: str) -> ScanExtractionResponse:
+    """
+    Parses, validates, and normalizes the JSON dictionary from Gemini for a pulse oximeter.
+    Enforces physiological ranges (SpO2: 50-100%, Pulse: 30-220 bpm).
+    """
+    quality_info = data.get("quality", {})
+    is_readable = bool(quality_info.get("is_readable", True))
+    glare_detected = bool(quality_info.get("glare_detected", False))
+    display_cut_off = bool(quality_info.get("display_cut_off", False))
+    issues = list(quality_info.get("issues", []))
+
+    quality = ImageQualityReport(
+        is_readable=is_readable,
+        glare_detected=glare_detected,
+        display_cut_off=display_cut_off,
+        issues=issues
+    )
+
+    if not is_readable:
+        issues_desc = "; ".join(issues) if issues else "Pulse oximeter digits are illegible or missing."
+        raise ValueError(f"Image is not readable: {issues_desc}")
+
+    values_dict = data.get("values", {})
+    if not isinstance(values_dict, dict):
+        raise ValueError("Missing 'values' object in oximeter model response.")
+
+    raw_spo2 = _parse_int(values_dict.get("spo2"))
+    raw_pulse = _parse_int(values_dict.get("pulse"))
+
+    if raw_spo2 is None:
+        raise ValueError("Could not extract SpO2 percentage from the image.")
+
+    # Physiological range check: SpO2 50-100%
+    if not (50 <= raw_spo2 <= 100):
+        quality.issues.append(f"Please verify this reading. SpO2 value {raw_spo2}% is outside expected range (50-100%).")
+        raw_spo2 = max(50, min(100, raw_spo2))
+    elif raw_spo2 < 85:
+        quality.issues.append(f"Low oxygen saturation alert ({raw_spo2}%). Please confirm device placement or reading accuracy.")
+
+    # Pulse range check: 30-220 bpm
+    if raw_pulse is not None:
+        if not (30 <= raw_pulse <= 220):
+            quality.issues.append(f"Please verify pulse reading {raw_pulse} bpm. Value appears outside standard bounds (30-220 bpm).")
+
+    values = SpO2Values(
+        spo2=raw_spo2,
+        pulse=raw_pulse
+    )
+
+    raw_confidence = data.get("confidence", 0.95)
+    try:
+        confidence = max(0.0, min(1.0, float(raw_confidence)))
+    except (TypeError, ValueError):
+        confidence = 0.90
+
+    device_name = data.get("device_name")
+    if device_name and str(device_name).strip().lower() in {"null", "none", ""}:
+        device_name = None
+
+    raw_detected_text = data.get("raw_detected_text")
+
+    return ScanExtractionResponse(
+        scan_id=scan_id,
+        detected_type="pulse_oximeter",
+        device_name=str(device_name).strip() if device_name else None,
+        values=values,
+        confidence=confidence,
+        quality=quality,
+        raw_detected_text=str(raw_detected_text).strip() if raw_detected_text else None
+    )
+
+
+def parse_weight_response(data: Dict[str, Any], scan_id: str) -> ScanExtractionResponse:
+    """
+    Parses, validates, and normalizes the JSON dictionary from Gemini for a digital weight scale.
+    Enforces physiological ranges (Weight: 2-300 kg or 4.4-660 lb).
+    """
+    quality_info = data.get("quality", {})
+    is_readable = bool(quality_info.get("is_readable", True))
+    glare_detected = bool(quality_info.get("glare_detected", False))
+    display_cut_off = bool(quality_info.get("display_cut_off", False))
+    issues = list(quality_info.get("issues", []))
+
+    quality = ImageQualityReport(
+        is_readable=is_readable,
+        glare_detected=glare_detected,
+        display_cut_off=display_cut_off,
+        issues=issues
+    )
+
+    if not is_readable:
+        issues_desc = "; ".join(issues) if issues else "Scale display digits are illegible or missing."
+        raise ValueError(f"Image is not readable: {issues_desc}")
+
+    values_dict = data.get("values", {})
+    if not isinstance(values_dict, dict):
+        raise ValueError("Missing 'values' object in scale model response.")
+
+    raw_weight = values_dict.get("weight")
+    if raw_weight is None:
+        raise ValueError("Could not extract weight reading from the image.")
+
+    try:
+        weight_val = float(raw_weight)
+    except (TypeError, ValueError):
+        digits = re.findall(r"\d+\.?\d*", str(raw_weight))
+        if digits:
+            weight_val = float(digits[0])
+        else:
+            raise ValueError(f"Invalid weight reading: {raw_weight}")
+
+    raw_unit = str(values_dict.get("unit", "kg")).strip().lower()
+    unit = "lb" if ("lb" in raw_unit or "pound" in raw_unit) else "kg"
+
+    # Physiological range check: Weight 2-300 kg or 4.4-660 lb
+    if unit == "kg":
+        if not (2.0 <= weight_val <= 300.0):
+            quality.issues.append(f"Please verify this reading. Weight {weight_val} kg appears outside standard range (2-300 kg).")
+    else:
+        if not (4.4 <= weight_val <= 660.0):
+            quality.issues.append(f"Please verify this reading. Weight {weight_val} lb appears outside standard range (4.4-660 lb).")
+
+    values = WeightValues(
+        weight=round(weight_val, 1),
+        unit=unit
+    )
+
+    raw_confidence = data.get("confidence", 0.95)
+    try:
+        confidence = max(0.0, min(1.0, float(raw_confidence)))
+    except (TypeError, ValueError):
+        confidence = 0.90
+
+    device_name = data.get("device_name")
+    if device_name and str(device_name).strip().lower() in {"null", "none", ""}:
+        device_name = None
+
+    raw_detected_text = data.get("raw_detected_text")
+
+    return ScanExtractionResponse(
+        scan_id=scan_id,
+        detected_type="weight",
+        device_name=str(device_name).strip() if device_name else None,
+        values=values,
+        confidence=confidence,
+        quality=quality,
+        raw_detected_text=str(raw_detected_text).strip() if raw_detected_text else None
+    )
+
+
 def detect_and_extract_measurement(
     image_bytes: bytes, 
     mime_type: str = "image/jpeg"
 ) -> ScanExtractionResponse:
     """
     Main entrypoint called by POST /api/scan/extract.
-    Supports both digital blood pressure monitors and digital glucometers.
+    Supports all 4 modalities: Blood Pressure Monitor, Pulse Oximeter, Glucometer, Weight Machine.
     """
     scan_id = f"scan_{uuid.uuid4().hex[:12]}"
     client = get_gemini_client()
@@ -422,7 +617,11 @@ def detect_and_extract_measurement(
             data = json.loads(cleaned_json)
 
             detected_type = str(data.get("detected_type", "")).lower()
-            if detected_type == "blood_glucose":
+            if detected_type in ("pulse_oximeter", "spo2", "oximeter"):
+                return parse_oximeter_response(data, scan_id)
+            elif detected_type in ("weight", "scale", "digital_scale"):
+                return parse_weight_response(data, scan_id)
+            elif detected_type in ("blood_glucose", "glucometer", "glucose"):
                 return parse_glucose_response(data, scan_id)
             else:
                 return parse_vision_response(data, scan_id)
@@ -434,4 +633,5 @@ def detect_and_extract_measurement(
 
     print(f"[VisionService] All Gemini Vision candidates failed: {last_err}")
     raise ValueError(f"Failed to detect or extract reading from image: {last_err}")
+
 

@@ -28,7 +28,7 @@ export function App() {
   const [glucoseMeasurements, setGlucoseMeasurements] = useState<BloodGlucoseMeasurement[]>([]);
   const [measurementsLoading, setMeasurementsLoading] = useState(false);
   const [showScanModal, setShowScanModal] = useState(false);
-  const [scanDefaultDevice, setScanDefaultDevice] = useState<'blood_pressure' | 'blood_glucose'>('blood_pressure');
+  const [scanDefaultDevice, setScanDefaultDevice] = useState<'blood_pressure' | 'pulse_oximeter' | 'blood_glucose' | 'weight'>('blood_pressure');
   const [refreshDashboardTrigger, setRefreshDashboardTrigger] = useState(0);
 
   const loadMeasurements = async (authToken: string) => {
@@ -234,9 +234,9 @@ export function App() {
           token={token}
           defaultDeviceType={scanDefaultDevice}
           onMeasurementSaved={(m) => {
-            if ('systolic' in m.values) {
+            if (m.values && 'systolic' in m.values) {
               setBpMeasurements(prev => [m as BloodPressureMeasurement, ...prev]);
-            } else {
+            } else if (m.values && 'glucose_value' in m.values) {
               setGlucoseMeasurements(prev => [m as BloodGlucoseMeasurement, ...prev]);
             }
             setRefreshDashboardTrigger(prev => prev + 1);

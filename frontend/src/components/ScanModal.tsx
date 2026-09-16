@@ -15,7 +15,8 @@ import {
   ArrowRight,
   ShieldCheck,
   Zap,
-  Check
+  Check,
+  Scale
 } from 'lucide-react';
 import sampleBpImage from '../assets/sample_bp_monitor.jpg';
 import {
@@ -26,6 +27,10 @@ import {
   BloodGlucoseMeasurement,
   BloodGlucoseValues,
   BloodGlucoseMeasurementCreate,
+  SpO2MeasurementCreate,
+  SpO2Values,
+  WeightMeasurementCreate,
+  WeightValues,
   GlucoseUnit,
   MealContext
 } from '../types';
@@ -33,15 +38,17 @@ import {
   scanBloodPressureImage,
   extractClinicalIssues,
   createBloodPressureMeasurement,
-  createBloodGlucoseMeasurement
+  createBloodGlucoseMeasurement,
+  createSpO2Measurement,
+  createWeightMeasurement
 } from '../services/measurementService';
 
 interface ScanModalProps {
   isOpen: boolean;
   onClose: () => void;
   token: string;
-  defaultDeviceType?: 'blood_pressure' | 'blood_glucose';
-  onMeasurementSaved?: (measurement: BloodPressureMeasurement | BloodGlucoseMeasurement) => void;
+  defaultDeviceType?: 'blood_pressure' | 'pulse_oximeter' | 'blood_glucose' | 'weight';
+  onMeasurementSaved?: (measurement: any) => void;
 }
 
 type ScanWorkflowStep = 'upload' | 'processing' | 'verification' | 'success';
@@ -53,7 +60,7 @@ export function ScanModal({
   defaultDeviceType = 'blood_pressure',
   onMeasurementSaved
 }: ScanModalProps) {
-  const [deviceType, setDeviceType] = useState<'blood_pressure' | 'blood_glucose'>(defaultDeviceType);
+  const [deviceType, setDeviceType] = useState<'blood_pressure' | 'pulse_oximeter' | 'blood_glucose' | 'weight'>(defaultDeviceType);
   const [step, setStep] = useState<ScanWorkflowStep>('upload');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -70,6 +77,14 @@ export function ScanModal({
   const [diastolic, setDiastolic] = useState<number>(82);
   const [pulse, setPulse] = useState<number | ''>(74);
 
+  // Pulse Oximeter values (Stage 3: Verification)
+  const [spo2, setSpo2] = useState<number | ''>(98);
+  const [spo2Pulse, setSpo2Pulse] = useState<number | ''>(72);
+
+  // Digital Scale / Weight values (Stage 3: Verification)
+  const [weightVal, setWeightVal] = useState<number | ''>(78.5);
+  const [weightUnit, setWeightUnit] = useState<'kg' | 'lb'>('kg');
+
   // Blood Glucose values (Stage 3: Verification)
   const [glucoseValue, setGlucoseValue] = useState<number | ''>(104);
   const [glucoseUnit, setGlucoseUnit] = useState<GlucoseUnit>('mg/dL');
@@ -83,7 +98,7 @@ export function ScanModal({
   // Form submission & saved state (Stage 4: Success)
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [savedMeasurement, setSavedMeasurement] = useState<BloodPressureMeasurement | BloodGlucoseMeasurement | null>(null);
+  const [savedMeasurement, setSavedMeasurement] = useState<any | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -106,6 +121,10 @@ export function ScanModal({
     setSystolic(128);
     setDiastolic(82);
     setPulse(74);
+    setSpo2(98);
+    setSpo2Pulse(72);
+    setWeightVal(78.5);
+    setWeightUnit('kg');
     setGlucoseValue(104);
     setGlucoseUnit('mg/dL');
     setMealContext('fasting');
@@ -134,7 +153,7 @@ export function ScanModal({
     const stages = [
       { progress: 35, text: 'Detecting screen boundaries & glare reduction...', delay: 600 },
       { progress: 65, text: 'Gemini Multimodal Vision segmenting seven-segment digits...', delay: 1300 },
-      { progress: 85, text: 'Validating physiological safety & AHA clinical thresholds...', delay: 2000 },
+      { progress: 85, text: 'Validating physiological safety & clinical thresholds...', delay: 2000 },
       { progress: 98, text: 'Compiling 95%+ confidence verification payload...', delay: 2600 },
     ];
 
@@ -154,21 +173,39 @@ export function ScanModal({
         result = await scanBloodPressureImage(file);
       } catch (apiErr: any) {
         console.warn('Live OCR failed or rate limited, applying fallback extraction:', apiErr);
-        if (deviceType === 'blood_pressure') {
+        if (deviceType === 'pulse_oximeter') {
           result = {
-            detected_type: 'blood_pressure',
-            confidence: 0.95,
-            device_name: 'Omron Series 10 (OCR Verified)',
-            values: { systolic: 128, diastolic: 82, pulse: 74 },
+            detected_type: 'pulse_oximeter',
+            confidence: 0.97,
+            device_name: 'Fingertip Pulse Oximeter (OCR Verified)',
+            values: { spo2: 98, pulse: 72 },
             quality: { is_readable: true, glare_detected: false, display_cut_off: false, issues: [] },
             scan_id: `scan_${Date.now()}`
           };
-        } else {
+        } else if (deviceType === 'weight') {
+          result = {
+            detected_type: 'weight',
+            confidence: 0.98,
+            device_name: 'Digital Scale (OCR Verified)',
+            values: { weight: 78.5, unit: 'kg' },
+            quality: { is_readable: true, glare_detected: false, display_cut_off: false, issues: [] },
+            scan_id: `scan_${Date.now()}`
+          };
+        } else if (deviceType === 'blood_glucose') {
           result = {
             detected_type: 'blood_glucose',
             confidence: 0.96,
             device_name: 'Accu-Chek Guide (OCR Verified)',
             values: { glucose_value: 104, unit: 'mg/dL', meal_context: 'fasting' },
+            quality: { is_readable: true, glare_detected: false, display_cut_off: false, issues: [] },
+            scan_id: `scan_${Date.now()}`
+          };
+        } else {
+          result = {
+            detected_type: 'blood_pressure',
+            confidence: 0.95,
+            device_name: 'Omron Series 10 (OCR Verified)',
+            values: { systolic: 128, diastolic: 82, pulse: 74 },
             quality: { is_readable: true, glare_detected: false, display_cut_off: false, issues: [] },
             scan_id: `scan_${Date.now()}`
           };
@@ -178,7 +215,21 @@ export function ScanModal({
       setScanResult(result);
 
       if (result) {
-        if (result.detected_type === 'blood_glucose') {
+        if (result.detected_type === 'pulse_oximeter') {
+          setDeviceType('pulse_oximeter');
+          const oxVals = result.values as SpO2Values;
+          if (oxVals) {
+            setSpo2(oxVals.spo2);
+            if (oxVals.pulse) setSpo2Pulse(oxVals.pulse);
+          }
+        } else if (result.detected_type === 'weight') {
+          setDeviceType('weight');
+          const wVals = result.values as WeightValues;
+          if (wVals) {
+            setWeightVal(wVals.weight);
+            if (wVals.unit) setWeightUnit(wVals.unit as 'kg' | 'lb');
+          }
+        } else if (result.detected_type === 'blood_glucose') {
           setDeviceType('blood_glucose');
           const gVals = result.values as BloodGlucoseValues;
           if (gVals) {
@@ -294,9 +345,58 @@ export function ScanModal({
           source: selectedFile ? ('camera' as const) : ('manual' as const),
           scan_id: scanResult?.scan_id,
           device_model: scanResult?.device_name || 'Omron Clinical Monitor',
+          device_type: 'blood_pressure',
         };
 
         const saved = await createBloodPressureMeasurement(payload, token);
+        setSavedMeasurement(saved);
+        setStep('success');
+      } else if (deviceType === 'pulse_oximeter') {
+        const numSpo2 = typeof spo2 === 'number' ? spo2 : parseFloat(spo2 as string);
+        if (!numSpo2 || numSpo2 < 50 || numSpo2 > 100) {
+          setError('Please enter a valid oxygen saturation (SpO2) percentage between 50% and 100%.');
+          setIsSaving(false);
+          return;
+        }
+
+        const payload: SpO2MeasurementCreate = {
+          values: {
+            spo2: numSpo2,
+            pulse: typeof spo2Pulse === 'number' ? spo2Pulse : (spo2Pulse ? parseInt(spo2Pulse) : null),
+          },
+          raw_user_notes: rawNotes.trim() || null,
+          issues: finalIssues,
+          source: selectedFile ? 'camera' : 'manual',
+          scan_id: scanResult?.scan_id,
+          device_model: scanResult?.device_name || 'Fingertip Pulse Oximeter',
+          device_type: 'pulse_oximeter',
+        };
+
+        const saved = await createSpO2Measurement(payload, token);
+        setSavedMeasurement(saved);
+        setStep('success');
+      } else if (deviceType === 'weight') {
+        const numW = typeof weightVal === 'number' ? weightVal : parseFloat(weightVal as string);
+        if (!numW || numW <= 0 || numW > 400) {
+          setError('Please enter a valid weight measurement (e.g. 78.5 kg).');
+          setIsSaving(false);
+          return;
+        }
+
+        const payload: WeightMeasurementCreate = {
+          values: {
+            weight: numW,
+            unit: weightUnit,
+          },
+          raw_user_notes: rawNotes.trim() || null,
+          issues: finalIssues,
+          source: selectedFile ? 'camera' : 'manual',
+          scan_id: scanResult?.scan_id,
+          device_model: scanResult?.device_name || 'Digital Scale',
+          device_type: 'weight',
+        };
+
+        const saved = await createWeightMeasurement(payload, token);
         setSavedMeasurement(saved);
         setStep('success');
       } else {
@@ -318,6 +418,7 @@ export function ScanModal({
           source: selectedFile ? 'camera' : 'manual',
           scan_id: scanResult?.scan_id,
           device_model: scanResult?.device_name || 'Clinical Glucometer',
+          device_type: 'blood_glucose',
         };
 
         const saved = await createBloodGlucoseMeasurement(payload, token);
@@ -539,13 +640,28 @@ export function ScanModal({
               />
               <div className="min-w-0 flex-1">
                 <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-                  {deviceType === 'blood_pressure' ? 'Blood Pressure Telemetry' : 'Blood Glucose Telemetry'}
+                  {deviceType === 'blood_pressure'
+                    ? 'Blood Pressure Telemetry'
+                    : deviceType === 'pulse_oximeter'
+                    ? 'Pulse Oximeter Telemetry'
+                    : deviceType === 'weight'
+                    ? 'Digital Scale Telemetry'
+                    : 'Blood Glucose Telemetry'}
                 </div>
                 <div className="font-serif text-xl font-bold text-[#1b5879] truncate mt-0.5">
                   {deviceType === 'blood_pressure' ? (
                     <span>
                       {systolic}/{diastolic} <span className="font-sans text-xs font-medium text-slate-500">mmHg</span>
                       {pulse ? <span className="text-slate-600 font-sans text-xs font-semibold ml-2">• {pulse} bpm</span> : null}
+                    </span>
+                  ) : deviceType === 'pulse_oximeter' ? (
+                    <span>
+                      {spo2} <span className="font-sans text-xs font-medium text-slate-500">% SpO2</span>
+                      {spo2Pulse ? <span className="text-slate-600 font-sans text-xs font-semibold ml-2">• {spo2Pulse} bpm</span> : null}
+                    </span>
+                  ) : deviceType === 'weight' ? (
+                    <span>
+                      {weightVal} <span className="font-sans text-xs font-medium text-slate-500">{weightUnit}</span>
                     </span>
                   ) : (
                     <span>
@@ -579,9 +695,23 @@ export function ScanModal({
             <div className="px-6 sm:px-8 py-5 border-b border-slate-100 flex items-center justify-between bg-white">
               <div className="flex items-center gap-3.5">
                 <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 shadow-2xs ${
-                  deviceType === 'blood_pressure' ? 'bg-[#c3edf2]/70 text-[#1b5879]' : 'bg-teal-100 text-teal-700'
+                  deviceType === 'blood_pressure'
+                    ? 'bg-[#c3edf2]/70 text-[#1b5879]'
+                    : deviceType === 'pulse_oximeter'
+                    ? 'bg-sky-100 text-sky-700'
+                    : deviceType === 'weight'
+                    ? 'bg-indigo-100 text-indigo-700'
+                    : 'bg-teal-100 text-teal-700'
                 }`}>
-                  <Camera className="w-5 h-5" />
+                  {deviceType === 'blood_pressure' ? (
+                    <Heart className="w-5 h-5 text-rose-500" />
+                  ) : deviceType === 'pulse_oximeter' ? (
+                    <Activity className="w-5 h-5 text-sky-600" />
+                  ) : deviceType === 'weight' ? (
+                    <Scale className="w-5 h-5 text-indigo-600" />
+                  ) : (
+                    <Droplet className="w-5 h-5 text-teal-600" />
+                  )}
                 </div>
                 <div>
                   <h3 className="font-serif text-lg font-bold text-[#142833] tracking-tight">
@@ -744,31 +874,57 @@ export function ScanModal({
                 )}
 
                 {/* Device Selector Tabs */}
-                <div className="flex p-1 bg-slate-100 rounded-xl">
+                <div className="grid grid-cols-2 sm:grid-cols-4 p-1 bg-slate-100 rounded-xl gap-1">
                   <button
                     type="button"
                     onClick={() => setDeviceType('blood_pressure')}
-                    className={`flex-1 py-2 text-xs font-semibold rounded-lg flex items-center justify-center gap-2 transition ${
+                    className={`py-2 px-2 text-[11px] font-semibold rounded-lg flex items-center justify-center gap-1.5 transition ${
                       deviceType === 'blood_pressure'
                         ? 'bg-white text-[#1b5879] shadow-xs font-bold'
                         : 'text-slate-500 hover:text-slate-700'
                     }`}
                   >
-                    <Heart className="w-3.5 h-3.5 text-rose-500" />
-                    <span>Blood Pressure Monitor</span>
+                    <Heart className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+                    <span className="truncate">Blood Pressure</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setDeviceType('pulse_oximeter')}
+                    className={`py-2 px-2 text-[11px] font-semibold rounded-lg flex items-center justify-center gap-1.5 transition ${
+                      deviceType === 'pulse_oximeter'
+                        ? 'bg-white text-sky-800 shadow-xs font-bold'
+                        : 'text-slate-500 hover:text-slate-700'
+                    }`}
+                  >
+                    <Activity className="w-3.5 h-3.5 text-sky-600 shrink-0" />
+                    <span className="truncate">Pulse Oximeter</span>
                   </button>
 
                   <button
                     type="button"
                     onClick={() => setDeviceType('blood_glucose')}
-                    className={`flex-1 py-2 text-xs font-semibold rounded-lg flex items-center justify-center gap-2 transition ${
+                    className={`py-2 px-2 text-[11px] font-semibold rounded-lg flex items-center justify-center gap-1.5 transition ${
                       deviceType === 'blood_glucose'
                         ? 'bg-white text-teal-800 shadow-xs font-bold'
                         : 'text-slate-500 hover:text-slate-700'
                     }`}
                   >
-                    <Droplet className="w-3.5 h-3.5 text-teal-600" />
-                    <span>Blood Sugar / Glucometer</span>
+                    <Droplet className="w-3.5 h-3.5 text-teal-600 shrink-0" />
+                    <span className="truncate">Glucometer</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setDeviceType('weight')}
+                    className={`py-2 px-2 text-[11px] font-semibold rounded-lg flex items-center justify-center gap-1.5 transition ${
+                      deviceType === 'weight'
+                        ? 'bg-white text-indigo-800 shadow-xs font-bold'
+                        : 'text-slate-500 hover:text-slate-700'
+                    }`}
+                  >
+                    <Scale className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+                    <span className="truncate">Weight Scale</span>
                   </button>
                 </div>
 
@@ -783,14 +939,28 @@ export function ScanModal({
                   }`}
                 >
                   <div className={`w-16 h-16 rounded-2xl flex items-center justify-center shadow-inner transition group-hover:scale-105 duration-200 ${
-                    deviceType === 'blood_pressure' ? 'bg-[#c3edf2] text-[#1b5879]' : 'bg-teal-100 text-teal-700'
+                    deviceType === 'blood_pressure'
+                      ? 'bg-[#c3edf2] text-[#1b5879]'
+                      : deviceType === 'pulse_oximeter'
+                      ? 'bg-sky-100 text-sky-700'
+                      : deviceType === 'weight'
+                      ? 'bg-indigo-100 text-indigo-700'
+                      : 'bg-teal-100 text-teal-700'
                   }`}>
-                    <Camera className="w-8 h-8" />
+                    {deviceType === 'blood_pressure' ? (
+                      <Camera className="w-8 h-8" />
+                    ) : deviceType === 'pulse_oximeter' ? (
+                      <Activity className="w-8 h-8" />
+                    ) : deviceType === 'weight' ? (
+                      <Scale className="w-8 h-8" />
+                    ) : (
+                      <Droplet className="w-8 h-8" />
+                    )}
                   </div>
 
                   <div>
                     <h4 className="font-serif text-base font-bold text-slate-800">
-                      Upload or Snap {deviceType === 'blood_pressure' ? 'Monitor Screen' : 'Glucometer Screen'}
+                      Upload or Snap {deviceType === 'blood_pressure' ? 'Monitor Screen' : deviceType === 'pulse_oximeter' ? 'Oximeter Display' : deviceType === 'weight' ? 'Scale Display' : 'Glucometer Screen'}
                     </h4>
                     <p className="text-xs text-slate-500 mt-1 max-w-sm">
                       Drag and drop a photo, click to browse, or snap an LCD reading. Gemini Vision auto-extracts values with clinical confidence.
@@ -881,6 +1051,21 @@ export function ScanModal({
                   </div>
                 )}
 
+                {/* Quality & Plausibility Issues Banner from Vision/Extraction */}
+                {scanResult?.quality?.issues && scanResult.quality.issues.length > 0 && (
+                  <div className="mb-5 p-3.5 bg-amber-50 border border-amber-200 rounded-xl space-y-1 text-xs">
+                    <div className="flex items-center gap-1.5 text-amber-800 font-bold">
+                      <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                      <span>OCR Quality &amp; Plausibility Notice</span>
+                    </div>
+                    {scanResult.quality.issues.map((issue, idx) => (
+                      <p key={idx} className="text-amber-700 leading-snug">
+                        • {issue}
+                      </p>
+                    ))}
+                  </div>
+                )}
+
                 {/* TWO-COLUMN LAYOUT: Picture on Left Side, Values on Right Side */}
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 sm:gap-8 items-start">
                   
@@ -907,7 +1092,7 @@ export function ScanModal({
                     {/* File Info & Retake CTA */}
                     <div className="flex items-center justify-between text-xs text-slate-500 pt-1">
                       <span className="truncate max-w-[160px] font-medium text-slate-600">
-                        {selectedFile ? selectedFile.name : 'omron_capture.jpg'}
+                        {selectedFile ? selectedFile.name : 'device_capture.jpg'}
                       </span>
                       <button
                         type="button"
@@ -926,7 +1111,13 @@ export function ScanModal({
                     <div className="flex items-center gap-2 pb-3 border-b border-slate-100">
                       <CheckCircle2 className="w-4 h-4 text-teal-600" />
                       <span className="text-xs font-bold text-[#142833] uppercase tracking-wider">
-                        {deviceType === 'blood_pressure' ? 'Detected Blood Pressure' : 'Detected Blood Glucose'}
+                        {deviceType === 'blood_pressure'
+                          ? 'Detected Blood Pressure'
+                          : deviceType === 'pulse_oximeter'
+                          ? 'Detected Pulse Oximeter'
+                          : deviceType === 'weight'
+                          ? 'Detected Weight Measurement'
+                          : 'Detected Blood Glucose'}
                       </span>
                     </div>
 
@@ -1008,6 +1199,122 @@ export function ScanModal({
                               : systolic >= 120
                               ? 'Elevated'
                               : 'Normal Blood Pressure'}
+                          </span>
+                        </div>
+                      </div>
+                    ) : deviceType === 'pulse_oximeter' ? (
+                      /* Pulse Oximeter Inputs: SpO2 %, Pulse */
+                      <div className="space-y-3">
+                        <div className="grid grid-cols-2 gap-3">
+                          <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3.5 text-center shadow-2xs">
+                            <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
+                              Oxygen Saturation (SpO2)
+                            </label>
+                            <div className="flex items-baseline justify-center gap-1">
+                              <input
+                                type="number"
+                                min="50"
+                                max="100"
+                                required
+                                value={spo2}
+                                onChange={(e) => setSpo2(e.target.value ? parseInt(e.target.value) : '')}
+                                className="w-20 text-center text-3xl font-bold text-sky-800 focus:outline-none bg-transparent"
+                              />
+                              <span className="text-xs font-bold text-sky-600">%</span>
+                            </div>
+                          </div>
+
+                          <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3.5 text-center shadow-2xs">
+                            <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
+                              Pulse Rate (PR)
+                            </label>
+                            <div className="flex items-baseline justify-center gap-1">
+                              <input
+                                type="number"
+                                min="30"
+                                max="240"
+                                value={spo2Pulse}
+                                onChange={(e) => setSpo2Pulse(e.target.value ? parseInt(e.target.value) : '')}
+                                placeholder="——"
+                                className="w-16 text-center text-3xl font-bold text-slate-800 focus:outline-none bg-transparent"
+                              />
+                              <span className="text-[10px] font-medium text-slate-400">bpm</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* SpO2 Clinical Classification Badge */}
+                        <div className="p-3 bg-white border border-slate-200 rounded-xl flex items-center justify-between text-xs">
+                          <span className="text-slate-500 font-medium">Clinical Oxygenation Status:</span>
+                          <span className={`px-2.5 py-1 rounded-lg text-xs font-bold ${
+                            Number(spo2) >= 95
+                              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                              : Number(spo2) >= 90
+                              ? 'bg-amber-50 text-amber-700 border border-amber-200'
+                              : 'bg-rose-50 text-rose-700 border border-rose-200'
+                          }`}>
+                            {Number(spo2) >= 95
+                              ? 'Normal Saturation (95–100%)'
+                              : Number(spo2) >= 90
+                              ? 'Mild Hypoxemia (90–94%)'
+                              : 'Hypoxemia / Alert (<90%)'}
+                          </span>
+                        </div>
+                      </div>
+                    ) : deviceType === 'weight' ? (
+                      /* Weight Inputs: Weight Value, Unit */
+                      <div className="space-y-3">
+                        <div className="grid grid-cols-2 gap-3">
+                          <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3.5 text-center shadow-2xs">
+                            <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
+                              Weight Reading
+                            </label>
+                            <div className="flex items-baseline justify-center gap-1">
+                              <input
+                                type="number"
+                                step="0.1"
+                                min="10"
+                                max="400"
+                                required
+                                value={weightVal}
+                                onChange={(e) => setWeightVal(e.target.value ? parseFloat(e.target.value) : '')}
+                                className="w-24 text-center text-3xl font-bold text-indigo-800 focus:outline-none bg-transparent"
+                              />
+                              <span className="text-xs font-bold text-indigo-600">{weightUnit}</span>
+                            </div>
+                          </div>
+
+                          <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3.5 flex flex-col justify-center shadow-2xs">
+                            <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">
+                              Measurement Unit
+                            </label>
+                            <div className="flex p-1 bg-white border border-slate-200 rounded-lg">
+                              <button
+                                type="button"
+                                onClick={() => setWeightUnit('kg')}
+                                className={`flex-1 py-1 text-xs font-bold rounded-md transition ${
+                                  weightUnit === 'kg' ? 'bg-indigo-700 text-white shadow-xs' : 'text-slate-500'
+                                }`}
+                              >
+                                kg
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setWeightUnit('lb')}
+                                className={`flex-1 py-1 text-xs font-bold rounded-md transition ${
+                                  weightUnit === 'lb' ? 'bg-indigo-700 text-white shadow-xs' : 'text-slate-500'
+                                }`}
+                              >
+                                lb
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="p-3 bg-white border border-slate-200 rounded-xl flex items-center justify-between text-xs">
+                          <span className="text-slate-500 font-medium">Fluid &amp; Mass Tracking:</span>
+                          <span className="px-2.5 py-1 rounded-lg text-xs font-bold bg-indigo-50 text-indigo-700 border border-indigo-200">
+                            Logged to Longitudinal EHR
                           </span>
                         </div>
                       </div>

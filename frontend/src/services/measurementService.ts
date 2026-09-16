@@ -158,3 +158,62 @@ export async function triggerFreshAnalysis(
 
   return res.json();
 }
+
+export async function createSpO2Measurement(
+  data: any,
+  token: string
+): Promise<any> {
+  const res = await fetch('/api/measurements/spo2', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    },
+    body: JSON.stringify(data),
+  });
+
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || 'Failed to save SpO2 measurement.');
+  }
+
+  return res.json();
+}
+
+export async function createWeightMeasurement(
+  data: any,
+  token: string
+): Promise<any> {
+  const res = await fetch('/api/measurements/weight', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    },
+    body: JSON.stringify(data),
+  });
+
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || 'Failed to save weight measurement.');
+  }
+
+  return res.json();
+}
+
+export async function generateDoctorReportPdf(token: string): Promise<Blob> {
+  const res = await fetch('/api/reports/doctor', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`
+    },
+  });
+
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || 'Failed to generate Doctor Health Report PDF.');
+  }
+
+  return res.blob();
+}
+

@@ -381,6 +381,193 @@ def preaggregate_health_data(
                             "recorded_at": curr_w.get("recorded_at")
                         })
 
+    # -------------------------------------------------------------
+    # Dynamic Modality Trends & Time-Period Calculation (BP, SpO2, Glucose, Weight)
+    # -------------------------------------------------------------
+    dynamic_trends: Dict[str, Any] = {}
+
+    # Helper for determining dynamic period label
+    def _compute_dynamic_period(records_with_dt: List[Tuple[datetime, Any]]) -> Tuple[int, str]:
+        if not records_with_dt:
+            return 14, "14-Day"
+        dts = [dt for dt, _ in records_with_dt]
+        span_days = max(1, round((max(dts) - min(dts)).total_seconds() / 86400.0))
+        if span_days <= 8:
+            return 7, "7-Day"
+        elif span_days <= 18:
+            return 14, "14-Day"
+        elif span_days <= 45:
+            return 30, "30-Day"
+        else:
+            return span_days, f"{span_days}-Day"
+
+    # A. Dynamic BP Trend
+    if bp_with_dt:
+        bp_period_days, bp_period_label = _compute_dynamic_period(bp_with_dt)
+        avg_sys = stats.get("avg_systolic")
+        evening_avg_sys = stats.get("evening_avg_bp", {}).get("systolic") if stats.get("evening_avg_bp") else None
+        prior_avg_sys = stats.get("trajectory_7d_vs_14d", {}).get("prior_7d_avg_systolic") if stats.get("trajectory_7d_vs_14d") else None
+
+        if evening_avg_sys is not None and abs(avg_sys - evening_avg_sys) >= 1.0:
+            comp_val = evening_avg_sys
+            comp_label = f"compared with {evening_avg_sys} mmHg in the evening"
+            bp_direction = "increase" if avg_sys > evening_avg_sys else "decrease"
+        elif prior_avg_sys is not None and abs(avg_sys - prior_avg_sys) >= 1.0:
+            comp_val = prior_avg_sys
+            comp_label = f"compared with your previous average of {prior_avg_sys} mmHg"
+            bp_direction = "increase" if avg_sys > prior_avg_sys else "decrease"
+        else:
+            avg_dia = stats.get("avg_diastolic", 80)
+            comp_val = avg_dia
+            comp_label = f"with diastolic pressure averaging {avg_dia} mmHg"
+            bp_direction = "stable"
+
+        dynamic_trends["blood_pressure"] = {
+            "period_days": bp_period_days,
+            "period_label": bp_period_label,
+            "headline": f"{bp_period_label} Blood Pressure Trend",
+            "avg_systolic": avg_sys,
+            "avg_diastolic": stats.get("avg_diastolic"),
+            "avg_pulse": stats.get("avg_pulse"),
+            "comp_val": comp_val,
+            "comp_label": comp_label,
+            "direction": bp_direction,
+            "count": len(systolics),
+            "explanation": f"Your systolic readings averaged {avg_sys} mmHg over the past {bp_period_days} days {comp_label} across {len(systolics)} verified readings.",
+            "clinician_talking_points": [
+                f"Discuss diurnal variation (morning vs evening systolic spread: {abs(round(avg_sys - (evening_avg_sys or avg_sys), 1))} mmHg).",
+                "Review home monitoring logs against AHA Stage 1 threshold guidelines."
+            ]
+        }
+
+    # B. Dynamic SpO2 Trend
+    spo2_with_dt = [
+        (_parse_iso_datetime(r.get("recorded_at")), r.get("values", {}).get("spo2"))
+        for r in bp_records
+        if _parse_iso_datetime(r.get("recorded_at")) and r.get("values", {}).get("spo2") is not None
+    ]
+    if spo2_with_dt:
+        spo2_with_dt.sort(key=lambda x: x[0])
+        spo2_period_days, spo2_period_label = _compute_dynamic_period(spo2_with_dt)
+        s_vals = [val for _, val in spo2_with_dt]
+        avg_s = round(sum(s_vals) / len(s_vals), 1)
+        # Recent half average
+        half_idx = max(1, len(s_vals) // 2)
+        rec_s = round(sum(s_vals[half_idx:]) / len(s_vals[half_idx:]), 1)
+        s_diff = round(rec_s - avg_s, 1)
+        spo2_direction = "increase" if s_diff >= 1.0 else "decrease" if s_diff <= -1.0 else "stable"
+
+        dynamic_trends["spo2"] = {
+            "period_days": spo2_period_days,
+            "period_label": spo2_period_label,
+            "headline": f"{spo2_period_label} Oxygen Saturation Trend",
+            "avg_spo2": avg_s,
+            "recent_spo2": rec_s,
+            "comp_val": rec_s,
+            "comp_label": f"recent average of {rec_s}%",
+            "direction": spo2_direction,
+            "count": len(s_vals),
+            "explanation": f"Your SpO2 remained around {avg_s}% over the last {spo2_period_days} days, with a recent average of {rec_s}% across {len(s_vals)} recorded readings.",
+            "clinician_talking_points": [
+                "Confirm peripheral oxygen saturation remains stably >= 95% at rest.",
+                "Review resting pulse consistency during pulse oximeter measurements."
+            ]
+        }
+
+    # C. Dynamic Glucose Trend
+    glu_with_dt = [
+        (_parse_iso_datetime(g.get("recorded_at")), g)
+        for g in glucose_records
+        if _parse_iso_datetime(g.get("recorded_at")) and g.get("values", {}).get("glucose_value") is not None
+    ]
+    if glu_with_dt:
+        glu_with_dt.sort(key=lambda x: x[0])
+        glu_period_days, glu_period_label = _compute_dynamic_period(glu_with_dt)
+        avg_g = stats.get("avg_glucose_mg_dl")
+        higher_readings = [v for v in glucose_vals if v >= 135.0]
+        high_cnt = len(higher_readings)
+        high_avg = round(sum(higher_readings) / high_cnt, 1) if high_cnt else None
+        glu_direction = "increase" if high_cnt >= 2 else "stable"
+
+        if high_cnt > 0:
+            glu_exp = f"Your glucose readings averaged {avg_g} mg/dL over the last {glu_period_days} days, with higher readings appearing on {high_cnt} occasion(s) (averaging {high_avg} mg/dL)."
+            comp_label = f"higher post-meal readings averaging {high_avg} mg/dL"
+        else:
+            glu_exp = f"Your glucose readings averaged {avg_g} mg/dL over the last {glu_period_days} days across {len(glucose_vals)} recordings, maintaining steady glycemic levels."
+            comp_label = f"fasting baseline within target envelope"
+
+        dynamic_trends["glucose"] = {
+            "period_days": glu_period_days,
+            "period_label": glu_period_label,
+            "headline": f"{glu_period_label} Glucose Trend",
+            "avg_glucose": avg_g,
+            "higher_count": high_cnt,
+            "higher_avg": high_avg,
+            "comp_val": high_avg or avg_g,
+            "comp_label": comp_label,
+            "direction": glu_direction,
+            "count": len(glucose_vals),
+            "explanation": glu_exp,
+            "clinician_talking_points": [
+                "Evaluate postprandial glucose excursions relative to meal timing and contents.",
+                "Confirm fasting blood glucose remains aligned with glycemic targets."
+            ]
+        }
+
+    # D. Dynamic Weight Trend
+    if weight_records and len(weight_records) >= 1:
+        w_with_dt = [
+            (_parse_iso_datetime(w.get("recorded_at")), float(w.get("weight_kg", 0)))
+            for w in weight_records
+            if _parse_iso_datetime(w.get("recorded_at")) and w.get("weight_kg") is not None
+        ]
+        w_with_dt.sort(key=lambda x: x[0])
+        w_period_days, w_period_label = _compute_dynamic_period(w_with_dt)
+        w_vals = [w for _, w in w_with_dt]
+        start_w = round(w_vals[0], 1)
+        end_w = round(w_vals[-1], 1)
+        diff_w = round(end_w - start_w, 1)
+        dir_w = f"+{diff_w} kg increase" if diff_w > 0 else f"{diff_w} kg reduction" if diff_w < 0 else "steady"
+        w_direction = "increase" if diff_w >= 0.5 else "decrease" if diff_w <= -0.5 else "stable"
+
+        dynamic_trends["weight"] = {
+            "period_days": w_period_days,
+            "period_label": w_period_label,
+            "headline": f"{w_period_label} Weight Trend",
+            "start_weight": start_w,
+            "end_weight": end_w,
+            "delta_kg": diff_w,
+            "comp_val": start_w,
+            "comp_label": f"baseline {start_w} kg ({dir_w})",
+            "direction": w_direction,
+            "count": len(w_vals),
+            "explanation": f"Your weight shifted from an average of {start_w} kg to {end_w} kg over the available {w_period_days}-day period ({dir_w} across {len(w_vals)} measurements).",
+            "clinician_talking_points": [
+                f"Track body weight delta ({dir_w}) alongside dietary sodium intake.",
+                "Monitor for fluid retention markers if rapid weight gain is observed."
+            ]
+        }
+
+    stats["dynamic_trends"] = dynamic_trends
+
+    # -------------------------------------------------------------
+    # Cross-Metric Paired Correlation Analysis (BP ↔ Weight, etc.)
+    # -------------------------------------------------------------
+    cross_metric_pairs = []
+    # BP ↔ Weight pairings (within 24 hours)
+    if bp_with_dt and weight_records:
+        for bp_dt, bp in bp_with_dt:
+            for w in weight_records:
+                w_dt = _parse_iso_datetime(w.get("recorded_at"))
+                if w_dt and abs((bp_dt - w_dt).total_seconds()) <= 86400:
+                    cross_metric_pairs.append({
+                        "type": "bp_weight",
+                        "systolic": bp.get("values", {}).get("systolic"),
+                        "diastolic": bp.get("values", {}).get("diastolic"),
+                        "weight_kg": w.get("weight_kg")
+                    })
+    stats["cross_metric_pairs"] = cross_metric_pairs
+
     # Running accumulators for O(k) incremental updates
     stats["accumulators"] = {
         "bp_count": len(systolics),
@@ -1040,6 +1227,87 @@ def generate_heuristic_correlations(
         elif evt.get("type") == "severe_hyperglycemia":
             urgent_alerts.append(f"Marked hyperglycemia reading ({evt.get('glucose_mg_dl')} mg/dL) detected.")
 
+    # 1b. Dynamic Modality Trends (BP, Weight, SpO2, Glucose)
+    dyn_trends = stats.get("dynamic_trends", {})
+    trend_correlations: List[CorrelationItem] = []
+    cross_metric_correlations: List[CorrelationItem] = []
+
+    # Blood Pressure Trend
+    bp_dyn = dyn_trends.get("blood_pressure")
+    if bp_dyn and bp_dyn.get("count", 0) >= 2:
+        trend_correlations.append(CorrelationItem(
+            category="longitudinal_trend",
+            confidence="high" if bp_dyn["count"] >= 5 else "moderate",
+            headline=bp_dyn["headline"],
+            explanation=bp_dyn["explanation"],
+            evidence_count=bp_dyn["count"],
+            clinical_suggestion="Continue regular morning and evening monitoring to track longitudinal stability."
+        ))
+
+    # Weight Trend
+    w_dyn = dyn_trends.get("weight")
+    if w_dyn and w_dyn.get("count", 0) >= 1:
+        trend_correlations.append(CorrelationItem(
+            category="longitudinal_trend",
+            confidence="high" if w_dyn["count"] >= 3 else "moderate",
+            headline=w_dyn["headline"],
+            explanation=w_dyn["explanation"],
+            evidence_count=w_dyn["count"],
+            clinical_suggestion="Log morning weight before breakfast to observe fluid balance."
+        ))
+
+    # SpO2 Oxygen Trend
+    spo2_dyn = dyn_trends.get("spo2")
+    if spo2_dyn and spo2_dyn.get("count", 0) >= 2:
+        trend_correlations.append(CorrelationItem(
+            category="longitudinal_trend",
+            confidence="high" if spo2_dyn["count"] >= 4 else "moderate",
+            headline=spo2_dyn["headline"],
+            explanation=spo2_dyn["explanation"],
+            evidence_count=spo2_dyn["count"],
+            clinical_suggestion="Peripheral oxygen saturation remains in clinical targets (95-100%). Continue regular checks."
+        ))
+
+    # Glucose Trend
+    glu_dyn = dyn_trends.get("glucose")
+    if glu_dyn and glu_dyn.get("count", 0) >= 2:
+        trend_correlations.append(CorrelationItem(
+            category="longitudinal_trend",
+            confidence="high" if glu_dyn["count"] >= 4 else "moderate",
+            headline=glu_dyn["headline"],
+            explanation=glu_dyn["explanation"],
+            evidence_count=glu_dyn["count"],
+            clinical_suggestion="Continue monitoring fasting and post-meal glucose to sustain glycemic stability."
+        ))
+
+    # Cross-Metric Correlations (BP ↔ Weight, BP ↔ SpO2)
+    if stats.get("cross_metric_pairs"):
+        pairs = stats["cross_metric_pairs"]
+        cnt = len(pairs)
+        if cnt >= 2:
+            avg_sys_paired = round(sum(p["systolic"] for p in pairs if p.get("systolic")) / cnt, 1)
+            avg_w_paired = round(sum(p["weight_kg"] for p in pairs if p.get("weight_kg")) / cnt, 1)
+            cross_metric_correlations.append(CorrelationItem(
+                category="multi_device_correlation",
+                confidence="high" if cnt >= 3 else "moderate",
+                headline="Multi-Device Relationship: Weight & Systolic BP Pattern",
+                explanation=f"Across {cnt} paired observation windows, higher weight measurements (averaging {avg_w_paired} kg) have occurred alongside higher systolic BP readings (averaging {avg_sys_paired} mmHg). Observed pattern in available data; consult clinician for clinical guidance.",
+                evidence_count=cnt,
+                clinical_suggestion="Track blood pressure alongside morning weights to evaluate fluid-related cardiovascular changes."
+            ))
+
+    avg_spo2 = stats.get("avg_spo2")
+    if avg_spo2 is not None and stats.get("avg_systolic") is not None:
+        spo2_cnt = stats.get("spo2_count", 1)
+        cross_metric_correlations.append(CorrelationItem(
+            category="multi_device_correlation",
+            confidence="high" if spo2_cnt >= 2 else "moderate",
+            headline="Multi-Device Relationship: BP ↔ SpO2 Telemetry Alignment",
+            explanation=f"Peripheral blood oxygen saturation (SpO2) remained around {avg_spo2}% across {spo2_cnt} reading{'s' if spo2_cnt > 1 else ''} on your Pulse Oximeter, confirming adequate microvascular oxygenation alongside Sphygmomanometer blood pressure recordings (averaging {stats['avg_systolic']}/{stats.get('avg_diastolic')} mmHg).",
+            evidence_count=spo2_cnt,
+            clinical_suggestion="Continue synchronizing readings between your Sphygmomanometer and Pulse Oximeter."
+        ))
+
     # 2. Lifestyle / Confounder Triggers
     confounders = stats.get("confounder_effects", {})
     for tag, c_data in confounders.items():
@@ -1275,6 +1543,38 @@ def generate_heuristic_correlations(
                     clinical_suggestion=f"Monitor biometric responses carefully when experiencing {tag_label.lower()}."
                 ))
 
+    # 6f. Prioritize distinct discovered patterns for the main insight tabs:
+    # Insight 1: Primary single-metric trend
+    # Insight 2: Secondary single-metric trend (different modality)
+    # Insight 3: Discovered cross-metric relationship
+    ordered_correlations: List[CorrelationItem] = []
+    if trend_correlations:
+        ordered_correlations.append(trend_correlations[0])
+    if len(trend_correlations) > 1:
+        ordered_correlations.append(trend_correlations[1])
+    if cross_metric_correlations:
+        ordered_correlations.append(cross_metric_correlations[0])
+    elif len(trend_correlations) > 2:
+        ordered_correlations.append(trend_correlations[2])
+
+    seen_headlines = {c.headline for c in ordered_correlations}
+    for item in cross_metric_correlations + trend_correlations + correlations:
+        if item.headline not in seen_headlines:
+            seen_headlines.add(item.headline)
+            ordered_correlations.append(item)
+
+    while len(ordered_correlations) < 3:
+        ordered_correlations.append(CorrelationItem(
+            category="other",
+            confidence="low",
+            headline="More Readings Needed",
+            explanation="More readings are needed to identify a reliable trend.",
+            evidence_count=0,
+            clinical_suggestion="Continue recording readings regularly with your health devices."
+        ))
+
+    correlations = ordered_correlations
+
     # 7. Rote Memory Incremental Continuation & Correlation Bank
     rote_mem = stats.get("rote_memory")
     session_resumed = bool(rote_mem.get("session_resumed")) if (rote_mem and isinstance(rote_mem, dict)) else False
@@ -1324,7 +1624,8 @@ def generate_heuristic_correlations(
             evening_avg_bp={"systolic": e_bp["systolic"], "diastolic": e_bp["diastolic"]} if e_bp else None,
             fasting_avg_glucose=stats.get("fasting_avg_glucose"),
             post_meal_avg_glucose=stats.get("post_meal_avg_glucose"),
-            trajectory_7d_vs_14d=stats.get("trajectory_7d_vs_14d")
+            trajectory_7d_vs_14d=stats.get("trajectory_7d_vs_14d"),
+            dynamic_trends=stats.get("dynamic_trends")
         ),
         patterns=stats.get("patterns"),
         rote_memory=RoteMemoryState(**rote_mem) if rote_mem else None,
@@ -1704,7 +2005,8 @@ def generate_correlation_insights(
                     evening_avg_bp={"systolic": e_bp["systolic"], "diastolic": e_bp["diastolic"]} if e_bp else None,
                     fasting_avg_glucose=stats.get("fasting_avg_glucose"),
                     post_meal_avg_glucose=stats.get("post_meal_avg_glucose"),
-                    trajectory_7d_vs_14d=stats.get("trajectory_7d_vs_14d")
+                    trajectory_7d_vs_14d=stats.get("trajectory_7d_vs_14d"),
+                    dynamic_trends=stats.get("dynamic_trends")
                 ),
                 patterns=stats.get("patterns"),
                 rote_memory=RoteMemoryState(**rote_mem) if rote_mem else None,
@@ -1803,14 +2105,19 @@ def get_or_compute_analysis(
             for doc in delta_docs:
                 item = doc.to_dict()
                 m_type = item.get("measurement_type")
-                if m_type == "blood_pressure":
+                if m_type in ("blood_pressure", "spo2", "pulse_oximeter"):
                     delta_bp_records.append(item)
                 elif m_type == "blood_glucose":
                     delta_glucose_records.append(item)
+                elif m_type == "weight":
+                    delta_weight_records.append(item)
 
             w_ref = db.collection("profiles").document(user_id).collection("weight_history")
             w_docs = w_ref.where("recorded_at", ">", prior_gen_at).stream()
-            delta_weight_records = [w.to_dict() for w in w_docs]
+            for w in w_docs:
+                w_item = w.to_dict()
+                if not any(d.get("recorded_at") == w_item.get("recorded_at") for d in delta_weight_records):
+                    delta_weight_records.append(w_item)
             fetch_success = True
         except Exception as delta_fetch_err:
             print(f"[AnalysisService] Notice: Delta fetch fallback to full fetch: {delta_fetch_err}")
@@ -1881,15 +2188,20 @@ def get_or_compute_analysis(
                 for doc in docs:
                     item = doc.to_dict()
                     m_type = item.get("measurement_type")
-                    if m_type == "blood_pressure":
+                    if m_type in ("blood_pressure", "spo2", "pulse_oximeter"):
                         bp_records.append(item)
                     elif m_type == "blood_glucose":
                         glucose_records.append(item)
+                    elif m_type == "weight":
+                        weight_records.append(item)
 
                 # Weight history
                 w_ref = db.collection("profiles").document(user_id).collection("weight_history")
                 w_docs = w_ref.limit(50).stream()
-                weight_records = [w.to_dict() for w in w_docs]
+                for w in w_docs:
+                    w_item = w.to_dict()
+                    if not any(wr.get("recorded_at") == w_item.get("recorded_at") for wr in weight_records):
+                        weight_records.append(w_item)
             except Exception as fetch_err:
                 print(f"[AnalysisService] Error reading user measurements: {fetch_err}")
 
